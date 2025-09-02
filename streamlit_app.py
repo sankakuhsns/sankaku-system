@@ -126,27 +126,33 @@ def render_store_attendance(user_info):
     start_date = selected_month.date()
     end_date = (start_date + relativedelta(months=1)) - timedelta(days=1)
 
-    # --- 1. 선택된 월의 근무 기록 불러오기 ---
     attendance_detail_df = load_data("근무기록_상세")
-    month_records_df = pd.DataFrame() # 빈 데이터프레임으로 초기화
+    month_records_df = pd.DataFrame()
 
     if not attendance_detail_df.empty and '근무일자' in attendance_detail_df.columns:
-        # 날짜 형식 통일 및 필터링
         attendance_detail_df['근무일자'] = pd.to_datetime(attendance_detail_df['근무일자'], errors='coerce').dt.strftime('%Y-%m-%d')
         month_records_df = attendance_detail_df[
             (pd.to_datetime(attendance_detail_df['근무일자']).dt.strftime('%Y-%m') == selected_month.strftime('%Y-%m')) &
             (attendance_detail_df['지점명'] == store_name)
         ].copy()
 
-    # --- 2. [로직 전면 개편] 월별 기록이 없으면 '기본 스케줄 생성' 버튼 표시 ---
     if month_records_df.empty:
         st.info(f"{selected_month_str}에 대한 근무 기록이 없습니다. 기본 스케줄을 생성해주세요.")
         if st.button(f"🗓️ {selected_month_str} 기본 스케줄 생성하기", type="primary"):
             new_records = []
+            
+            # [오류 해결] 요일 인식 로직 대폭 개선
             day_map = {'월': 0, '화': 1, '수': 2, '목': 3, '금': 4, '토': 5, '일': 6}
-            for dt in pd.date_range(start_date, end_date):
-                for _, emp in store_employees_df.iterrows():
-                    if dt.weekday() in [day_map.get(d) for d in emp.get('근무요일', '').split(',')]:
+            
+            for _, emp in store_employees_df.iterrows():
+                work_days_str = emp.get('근무요일', '')
+                # 쉼표, 슬래시, 공백 등 다양한 구분자를 처리하고, '요일' 글자 제거
+                cleaned_days = re.sub(r'요일|[,\s/]+', ' ', work_days_str).split()
+                
+                work_day_indices = {day_map[day[0]] for day in cleaned_days if day and day[0] in day_map}
+
+                for dt in pd.date_range(start_date, end_date):
+                    if dt.weekday() in work_day_indices:
                         record_id = f"manual_{dt.strftime('%y%m%d')}_{emp['이름']}_{int(datetime.now().timestamp())}"
                         new_records.append({
                             "기록ID": record_id, "지점명": store_name, "근무일자": dt.strftime('%Y-%m-%d'),
@@ -156,16 +162,14 @@ def render_store_attendance(user_info):
             
             if new_records:
                 new_df = pd.DataFrame(new_records)
-                # 전체 상세 기록과 합쳐서 업데이트
                 final_sheet_df = pd.concat([attendance_detail_df, new_df], ignore_index=True)
                 if update_sheet("근무기록_상세", final_sheet_df):
                     st.success("기본 스케줄이 생성되었습니다. 페이지를 새로고침합니다.")
                     st.rerun()
             else:
                 st.warning("스케줄을 생성할 직원이 없습니다.")
-        return # 스케줄 생성 전까지는 아래 로직 실행 안 함
+        return
 
-    # --- 3. 근무 현황 표시 및 관리 (기록이 있는 경우) ---
     def calculate_duration(row):
         try:
             start_t = datetime.strptime(str(row['출근시간']), '%H:%M')
@@ -237,7 +241,6 @@ def render_store_attendance(user_info):
     st.markdown('<div id="summary-table">', unsafe_allow_html=True)
     st.dataframe(display_summary.style.format(formatter), use_container_width=True, hide_index=True)
     st.markdown('</div>', unsafe_allow_html=True)
-
 
 def render_store_settlement(user_info):
     st.subheader("💰 정산 및 재고")
@@ -413,3 +416,4 @@ else:
         with store_tabs[0]: render_store_attendance(user_info)
         with store_tabs[1]: render_store_settlement(user_info)
         with store_tabs[2]: render_store_employee_info(user_info)
+
