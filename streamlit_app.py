@@ -102,6 +102,8 @@ def login_screen():
 # 2. 지점 (Store) 페이지 기능
 # =============================================================================
 
+# streamlit_app.py 파일에서 이 함수를 찾아 아래 코드로 교체하세요.
+
 def render_store_attendance(user_info):
     st.subheader("⏰ 월별 근무기록")
     store_name = user_info['지점명']
@@ -138,7 +140,7 @@ def render_store_attendance(user_info):
                 work_days = [d.strip() for d in emp.get('근무요일', '').split(',')]
                 if single_date.weekday() in [day_map.get(d) for d in work_days]:
                     schedule_entries.append({
-                        "일": single_date.day,
+                        "일": str(single_date.day), # <--- 숫자(day)를 문자(str)로 변경
                         "직원 이름": emp['이름'],
                         "출근 시간": emp.get('기본출근', '09:00').replace(':', ''),
                         "퇴근 시간": emp.get('기본퇴근', '18:00').replace(':', ''),
@@ -158,8 +160,13 @@ def render_store_attendance(user_info):
         "비고": st.column_config.TextColumn("비고"),
     }
     
-    final_schedule_df = st.data_editor(st.session_state[schedule_key], num_rows="dynamic",
-        use_container_width=True, column_config=col_config, key=f"editor_{schedule_key}")
+    final_schedule_df = st.data_editor(
+        st.session_state[schedule_key],
+        num_rows="dynamic",
+        use_container_width=True,
+        column_config=col_config,
+        key=f"editor_{schedule_key}"
+    )
 
     if st.button("✅ 이달 근무기록 최종 확정", use_container_width=True, type="primary"):
         df_to_save = final_schedule_df.dropna(subset=['일', '직원 이름', '출근 시간', '퇴근 시간']).reset_index(drop=True)
@@ -185,7 +192,6 @@ def render_store_attendance(user_info):
                     del st.session_state[schedule_key]
                     st.rerun()
         else: st.warning("확정할 근무기록이 없습니다.")
-
 
 def render_store_settlement(user_info):
     st.subheader("💰 정산 및 재고")
@@ -386,5 +392,6 @@ else:
         with store_tabs[0]: render_store_attendance(user_info)
         with store_tabs[1]: render_store_settlement(user_info)
         with store_tabs[2]: render_store_employee_info(user_info)
+
 
 
