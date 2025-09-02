@@ -69,10 +69,8 @@ def to_excel(df):
     return output.getvalue()
 
 def extract_okpos_data(uploaded_file):
-    # !중요! 이 함수는 제공해주신 OKPOS 분석 코드의 파싱 로직으로 교체해야 합니다.
     st.warning("OKPOS 파일 파싱 로직이 구현되지 않았습니다. (현재는 예시 데이터로 동작)")
     try:
-        # 예시: df = pd.read_excel(uploaded_file, header=7) ...
         data = {
             '매출일자': [date(2025, 8, 1), date(2025, 8, 1)], '지점명': ['강남점', '강남점'], 
             '매출유형': ['홀매출', '포장매출'], '금액': [500000, 150000], '요일': ['금요일', '금요일']
@@ -113,8 +111,6 @@ def login_screen():
 # 2. 지점 (Store) 페이지 기능
 # =============================================================================
 
-# streamlit_app.py 파일에서 이 함수를 찾아 아래 코드로 교체하세요.
-
 def render_store_attendance(user_info):
     st.subheader("⏰ 월별 근무기록")
     store_name = user_info['지점명']
@@ -126,7 +122,6 @@ def render_store_attendance(user_info):
         st.warning("먼저 '직원마스터' 시트에 해당 지점의 직원을 등록해주세요.")
         return
 
-    # 년/월 선택 형식 유지
     today = date.today()
     options = [(today - relativedelta(months=i)).strftime('%Y년 / %m월') for i in range(12)]
     selected_month_str_display = st.selectbox("근무 기록 년/월 선택", options=options)
@@ -135,7 +130,6 @@ def render_store_attendance(user_info):
     st.markdown("---")
     st.markdown("##### 근무 기록 입력")
 
-    # --- 1. '근무일자'를 '일(DD)'로 변경 ---
     col_config = {
         "일": st.column_config.TextColumn("일 (DD)", max_chars=2, required=True),
         "직원 이름": st.column_config.SelectboxColumn("직원 이름", options=store_employees, required=True),
@@ -147,53 +141,43 @@ def render_store_attendance(user_info):
         st.session_state.attendance_df = pd.DataFrame(columns=col_config.keys())
 
     edited_df = st.data_editor(
-        st.session_state.attendance_df,
-        num_rows="dynamic",
-        use_container_width=True,
-        column_config=col_config,
-        key="attendance_editor"
+        st.session_state.attendance_df, num_rows="dynamic", use_container_width=True,
+        column_config=col_config, key="attendance_editor"
     )
     
     if st.button("💾 근무기록 저장하기", use_container_width=True, type="primary"):
-        df_to_save = edited_df.dropna()
+        df_to_save = edited_df.dropna(how='all')
         if not df_to_save.empty:
             preview_entries = []
             is_valid = True
-            for _, row in df_to_save.iterrows():
+            for index, row in df_to_save.iterrows():
                 try:
-                    # --- 2. 선택된 년/월과 입력된 '일'을 조합하여 날짜 생성 ---
-                    day_str = f"{int(row['일']):02d}" # '1' -> '01'로 변환
+                    day_str = f"{int(row['일']):02d}"
                     full_date_str = f"{selected_month_str}-{day_str}"
-                    datetime.strptime(full_date_str, '%Y-%m-%d') # 날짜 유효성 검사
+                    datetime.strptime(full_date_str, '%Y-%m-%d')
 
                     in_time_str = f"{row['출근 시간'][:2]}:{row['출근 시간'][2:]}"
                     out_time_str = f"{row['퇴근 시간'][:2]}:{row['퇴근 시간'][2:]}"
                     datetime.strptime(in_time_str, '%H:%M')
                     datetime.strptime(out_time_str, '%H:%M')
                     
-                    preview_entries.append({
-                        '근무일자': full_date_str,
-                        '직원 이름': row['직원 이름'],
-                        '출근': in_time_str,
-                        '퇴근': out_time_str,
-                    })
-                except Exception:
-                    st.error(f"'{row['직원 이름']}' 직원의 날짜(DD) 또는 시간(HHMM) 형식이 올바르지 않습니다.")
+                    preview_entries.append({'근무일자': full_date_str, '직원 이름': row['직원 이름'],
+                                            '출근': in_time_str, '퇴근': out_time_str})
+                except (ValueError, TypeError, KeyError):
+                    st.error(f"{index+1}번째 행의 '{row.get('직원 이름', '알수없음')}' 직원 정보의 날짜(DD) 또는 시간(HHMM) 형식이 올바르지 않습니다.")
                     is_valid = False
                     break
             
             if is_valid:
-                preview_df = pd.DataFrame(preview_entries)
-                st.session_state['preview_attendance'] = preview_df
-                
-                st.markdown("---")
-                st.markdown("##### 📥 저장될 내용 미리보기")
-                st.dataframe(preview_df, use_container_width=True, hide_index=True)
-
+                st.session_state['preview_attendance'] = pd.DataFrame(preview_entries)
         else:
             st.warning("입력된 근무기록이 없습니다.")
 
     if 'preview_attendance' in st.session_state and not st.session_state['preview_attendance'].empty:
+        st.markdown("---")
+        st.markdown("##### 📥 저장될 내용 미리보기")
+        st.dataframe(st.session_state['preview_attendance'], use_container_width=True, hide_index=True)
+        
         if st.button("✅ 최종 확정 및 저장", use_container_width=True, type="primary"):
             preview_df = st.session_state['preview_attendance']
             log_entries = []
@@ -253,17 +237,17 @@ def render_store_settlement(user_info):
     selected_dt = datetime.strptime(selected_month_pl, '%Y-%m')
     prev_month_str = (selected_dt - relativedelta(months=1)).strftime('%Y-%m')
 
-    # 데이터 타입 변환
+    # 데이터 타입 변환 및 필터링
     sales_log['매출일자'] = pd.to_datetime(sales_log['매출일자'], errors='coerce').dt.strftime('%Y-%m')
-    settlement_log['정산일자'] = pd.to_datetime(settlement_log['정산일자'], errors='coerce').dt.strftime('%Y-%m')
-    inventory_log['평가년월'] = pd.to_datetime(inventory_log['평가년월'], errors='coerce').dt.strftime('%Y-%m')
-    
     total_sales = sales_log[(sales_log['매출일자'] == selected_month_pl) & (sales_log['지점명'] == store_name)]['금액'].sum()
+    
+    settlement_log['정산일자'] = pd.to_datetime(settlement_log['정산일자'], errors='coerce').dt.strftime('%Y-%m')
     store_settlement = settlement_log[(settlement_log['정산일자'] == selected_month_pl) & (settlement_log['지점명'] == store_name)]
     
     food_purchase = store_settlement[store_settlement['대분류'] == '식자재']['금액'].sum()
     sga_expenses = store_settlement[store_settlement['대분류'] != '식자재']['금액'].sum()
     
+    inventory_log['평가년월'] = pd.to_datetime(inventory_log['평가년월'], errors='coerce').dt.strftime('%Y-%m')
     begin_inv_series = inventory_log[(inventory_log['평가년월'] == prev_month_str) & (inventory_log['지점명'] == store_name)]['재고평가액']
     end_inv_series = inventory_log[(inventory_log['평가년월'] == selected_month_pl) & (inventory_log['지점명'] == store_name)]['재고평가액']
 
@@ -308,14 +292,12 @@ def render_store_employee_info(user_info):
     display_cols = ['이름', '직책', '입사일', '연락처', '보건증만료일']
     st.dataframe(store_employees_df[display_cols].astype(str).replace('NaT',''), use_container_width=True, hide_index=True)
 
-
 # =============================================================================
 # 3. 관리자 (Admin) 페이지 기능
 # =============================================================================
 
 def render_admin_dashboard():
     st.subheader("📊 통합 대시보드")
-    # 여기에 Plotly 차트 등 대시보드 기능 구현
     st.info("전체 지점 데이터 종합 대시보드 기능이 여기에 구현될 예정입니다.")
 
 def render_admin_settlement_input():
@@ -447,6 +429,3 @@ else:
         with store_tabs[0]: render_store_attendance(user_info)
         with store_tabs[1]: render_store_settlement(user_info)
         with store_tabs[2]: render_store_employee_info(user_info)
-
-
-
