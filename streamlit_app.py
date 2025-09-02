@@ -126,19 +126,18 @@ def render_store_attendance(user_info):
         st.warning("먼저 '직원마스터' 시트에 해당 지점의 직원을 등록해주세요.")
         return
 
-    # --- 1. 년/월 선택 형식 변경 ---
+    # 년/월 선택 형식 유지
     today = date.today()
     options = [(today - relativedelta(months=i)).strftime('%Y년 / %m월') for i in range(12)]
     selected_month_str_display = st.selectbox("근무 기록 년/월 선택", options=options)
-    # 계산을 위해 YYYY-MM 형식으로 변환
     selected_month_str = datetime.strptime(selected_month_str_display, '%Y년 / %m월').strftime('%Y-%m')
 
     st.markdown("---")
     st.markdown("##### 근무 기록 입력")
 
-    # --- 2. 입력 형식 변경 (YYMMDD, HHMM) ---
+    # --- 1. '근무일자'를 '일(DD)'로 변경 ---
     col_config = {
-        "근무일자": st.column_config.DateColumn("근무일자 (YYMMDD)", format="YYMMDD", required=True),
+        "일": st.column_config.TextColumn("일 (DD)", max_chars=2, required=True),
         "직원 이름": st.column_config.SelectboxColumn("직원 이름", options=store_employees, required=True),
         "출근 시간": st.column_config.TextColumn("출근 시간 (HHMM)", max_chars=4, required=True),
         "퇴근 시간": st.column_config.TextColumn("퇴근 시간 (HHMM)", max_chars=4, required=True),
@@ -155,7 +154,6 @@ def render_store_attendance(user_info):
         key="attendance_editor"
     )
     
-    # --- 3. 저장 전 미리보기 기능 추가 ---
     if st.button("💾 근무기록 저장하기", use_container_width=True, type="primary"):
         df_to_save = edited_df.dropna()
         if not df_to_save.empty:
@@ -163,26 +161,30 @@ def render_store_attendance(user_info):
             is_valid = True
             for _, row in df_to_save.iterrows():
                 try:
-                    # HHMM 형식에 콜론(:)을 추가하여 시간 형식 유효성 검사
+                    # --- 2. 선택된 년/월과 입력된 '일'을 조합하여 날짜 생성 ---
+                    day_str = f"{int(row['일']):02d}" # '1' -> '01'로 변환
+                    full_date_str = f"{selected_month_str}-{day_str}"
+                    datetime.strptime(full_date_str, '%Y-%m-%d') # 날짜 유효성 검사
+
                     in_time_str = f"{row['출근 시간'][:2]}:{row['출근 시간'][2:]}"
                     out_time_str = f"{row['퇴근 시간'][:2]}:{row['퇴근 시간'][2:]}"
                     datetime.strptime(in_time_str, '%H:%M')
                     datetime.strptime(out_time_str, '%H:%M')
                     
                     preview_entries.append({
-                        '근무일자': row['근무일자'].strftime('%Y-%m-%d'),
+                        '근무일자': full_date_str,
                         '직원 이름': row['직원 이름'],
                         '출근': in_time_str,
                         '퇴근': out_time_str,
                     })
                 except Exception:
-                    st.error(f"'{row['직원 이름']}' 직원의 시간 형식이 올바르지 않습니다 (HHMM 형식, 예: 0900).")
+                    st.error(f"'{row['직원 이름']}' 직원의 날짜(DD) 또는 시간(HHMM) 형식이 올바르지 않습니다.")
                     is_valid = False
                     break
             
             if is_valid:
                 preview_df = pd.DataFrame(preview_entries)
-                st.session_state['preview_attendance'] = preview_df # 최종 저장을 위해 세션에 저장
+                st.session_state['preview_attendance'] = preview_df
                 
                 st.markdown("---")
                 st.markdown("##### 📥 저장될 내용 미리보기")
@@ -191,7 +193,6 @@ def render_store_attendance(user_info):
         else:
             st.warning("입력된 근무기록이 없습니다.")
 
-    # 미리보기 데이터가 세션에 있을 경우에만 최종 저장 버튼 표시
     if 'preview_attendance' in st.session_state and not st.session_state['preview_attendance'].empty:
         if st.button("✅ 최종 확정 및 저장", use_container_width=True, type="primary"):
             preview_df = st.session_state['preview_attendance']
@@ -205,7 +206,6 @@ def render_store_attendance(user_info):
             log_df = pd.DataFrame(log_entries, columns=['기록일시', '지점명', '직원이름', '출/퇴근', '근무시각'])
             if append_rows("출근부_로그", log_df):
                 st.success("근무기록이 성공적으로 저장되었습니다.")
-                # 성공 후 세션 초기화
                 del st.session_state['preview_attendance']
                 st.session_state.attendance_df = pd.DataFrame(columns=col_config.keys())
                 st.rerun()
@@ -447,4 +447,5 @@ else:
         with store_tabs[0]: render_store_attendance(user_info)
         with store_tabs[1]: render_store_settlement(user_info)
         with store_tabs[2]: render_store_employee_info(user_info)
+
 
