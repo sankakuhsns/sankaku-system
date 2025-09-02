@@ -1,6 +1,7 @@
 streamlit
 gspread
 pandas
-plotly
-openpyxl
+google-auth-oauthlib
+python-dateutil
 holidays
+xlsxwriter
