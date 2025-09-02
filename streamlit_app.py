@@ -15,23 +15,28 @@ import io
 st.set_page_config(page_title="산카쿠 통합 관리 시스템", page_icon="🏢", layout="wide")
 
 # --- 구글 시트 연결 ---
-# @st.cache_resource: 한 번 실행된 리소스는 캐시에 저장하여 재실행 방지
 @st.cache_resource
 def get_gspread_client():
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"  # <--- 권한 추가된 부분
+    ]
     creds = Credentials.from_service_account_info(
         st.secrets["gcp_service_account"], scopes=scopes
     )
     return gspread.authorize(creds)
 
-# @st.cache_data: 함수의 입력값이 바뀌지 않으면 함수를 재실행하지 않고 캐시된 결과 반환
-@st.cache_data(ttl=600) # 10분마다 데이터 새로고침
+@st.cache_data(ttl=600)
 def load_data(sheet_name):
-    SPREADSHEET_NAME = "산카쿠 통합 정산 시스템" # 본인의 구글 시트 파일 이름
     try:
-        spreadsheet = get_gspread_client().open(SPREADSHEET_NAME)
+        spreadsheet = get_gspread_client().open_by_key(st.secrets["gcp_service_account"]["SPREADSHEET_KEY"])
         worksheet = spreadsheet.worksheet(sheet_name)
         return pd.DataFrame(worksheet.get_all_records())
+    except gspread.exceptions.APIError as e:
+        st.error(f"구글 시트 API 오류가 발생했습니다. (오류: {e})")
+        st.error("1. Secrets에 SPREADSHEET_KEY가 올바르게 입력되었는지 확인하세요.")
+        st.error("2. 해당 서비스 계정 이메일이 구글 시트 파일에 '편집자'로 공유되었는지 확인하세요.")
+        return pd.DataFrame()
     except Exception as e:
         st.error(f"'{sheet_name}' 시트를 불러오는 중 오류 발생: {e}")
         return pd.DataFrame()
@@ -39,11 +44,10 @@ def load_data(sheet_name):
 def update_sheet(sheet_name, df):
     """데이터프레임으로 시트 전체를 업데이트하는 함수"""
     try:
-        SPREADSHEET_NAME = "산카쿠 통합 정산 시스템"
-        spreadsheet = get_gspread_client().open(SPREADSHEET_NAME)
+        spreadsheet = get_gspread_client().open_by_key(st.secrets["gcp_service_account"]["SPREADSHEET_KEY"])
         worksheet = spreadsheet.worksheet(sheet_name)
         worksheet.update([df.columns.values.tolist()] + df.values.tolist())
-        st.cache_data.clear() # 데이터 변경 후 캐시 초기화
+        st.cache_data.clear()
         return True
     except Exception as e:
         st.error(f"'{sheet_name}' 시트 업데이트 중 오류 발생: {e}")
@@ -52,11 +56,10 @@ def update_sheet(sheet_name, df):
 def append_rows(sheet_name, rows_df):
     """데이터프레임의 행들을 시트에 추가하는 함수"""
     try:
-        SPREADSHEET_NAME = "산카쿠 통합 정산 시스템"
-        spreadsheet = get_gspread_client().open(SPREADSHEET_NAME)
+        spreadsheet = get_gspread_client().open_by_key(st.secrets["gcp_service_account"]["SPREADSHEET_KEY"])
         worksheet = spreadsheet.worksheet(sheet_name)
         worksheet.append_rows(rows_df.values.tolist())
-        st.cache_data.clear() # 데이터 변경 후 캐시 초기화
+        st.cache_data.clear()
         return True
     except Exception as e:
         st.error(f"'{sheet_name}' 시트에 행 추가 중 오류 발생: {e}")
@@ -97,7 +100,6 @@ def render_store_attendance(user_info):
     """월별 근무기록 입력 및 조회"""
     st.subheader("⏰ 월별 근무기록")
     
-    # ... 기능 구현 ...
     st.info("지점별 월별 근무기록 입력 기능이 여기에 구현될 예정입니다.")
 
 
@@ -105,14 +107,12 @@ def render_store_settlement(user_info):
     """월말 재고 입력 및 정산표 확인"""
     st.subheader("💰 정산 및 재고")
     
-    # ... 기능 구현 ...
     st.info("월말 재고 입력 및 정산표 확인 기능이 여기에 구현될 예정입니다.")
 
 def render_store_employee_info(user_info):
     """직원 정보 및 보건증 관리"""
     st.subheader("👥 직원 정보")
     
-    # ... 기능 구현 ...
     st.info("직원 정보 및 보건증 만료일 확인 기능이 여기에 구현될 예정입니다.")
 
 # =============================================================================
@@ -123,14 +123,12 @@ def render_admin_dashboard():
     """통합 대시보드"""
     st.subheader("📊 통합 대시보드")
     
-    # ... 기능 구현 ...
     st.info("전체 지점 데이터 종합 대시보드 기능이 여기에 구현될 예정입니다.")
 
 def render_admin_settlement_input():
     """월별 정산 내역 입력"""
     st.subheader("✍️ 월별 정산 입력")
 
-    # ... 기능 구현 ...
     st.info("월별/지점별 지출 내역 입력 기능이 여기에 구현될 예정입니다.")
 
 
@@ -138,7 +136,6 @@ def render_admin_employee_management():
     """전 직원 관리"""
     st.subheader("🗂️ 전 직원 관리")
 
-    # ... 기능 구현 ...
     st.info("전체 직원 정보, 출근부, 보건증 현황 관리 기능이 여기에 구현될 예정입니다.")
 
 
@@ -146,7 +143,6 @@ def render_admin_settings():
     """OKPOS 업로드 및 시스템 설정"""
     st.subheader("⚙️ 데이터 및 설정")
 
-    # ... 기능 구현 ...
     st.info("OKPOS 파일 업로드, 지점 계정 관리 기능이 여기에 구현될 예정입니다.")
 
 # =============================================================================
