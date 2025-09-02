@@ -6,7 +6,7 @@ import pandas as pd
 from google.oauth2.service_account import Credentials
 from datetime import datetime, date, time, timedelta
 from dateutil.relativedelta import relativedelta
-import re # 시간 형식 검증을 위해 re 모듈 추가
+import re
 import holidays
 
 # =============================================================================
@@ -28,14 +28,11 @@ def load_data(sheet_name):
         worksheet = spreadsheet.worksheet(sheet_name)
         df = pd.DataFrame(worksheet.get_all_records())
 
-        # [오류 해결] 모든 텍스트(object) 컬럼의 좌우 공백을 자동으로 제거
         for col in df.select_dtypes(include=['object']).columns:
             df[col] = df[col].astype(str).str.strip()
 
-        # 숫자 컬럼 변환
         for col in df.columns:
             if any(keyword in col for keyword in ['금액', '평가액', '총시간']):
-                # 쉼표 제거 후 숫자 변환
                 df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
         return df
     except Exception as e:
@@ -73,7 +70,6 @@ def append_rows(sheet_name, rows_df):
 def check_health_cert_expiration(user_info):
     store_name = user_info['지점명']
     all_employees_df = load_data("직원마스터")
-        
     store_employees_df = all_employees_df[(all_employees_df['소속지점'] == store_name) & (all_employees_df['재직상태'] == '재직중')]
     if store_employees_df.empty: return
 
@@ -102,7 +98,6 @@ def login_screen():
         submitted = st.form_submit_button("로그인", use_container_width=True)
         if submitted:
             user_info_df = users_df[(users_df['지점ID'] == username.strip()) & (users_df['지점PW'] == password)]
-            
             if not user_info_df.empty:
                 st.session_state['logged_in'] = True
                 st.session_state['user_info'] = user_info_df.iloc[0].to_dict()
@@ -118,53 +113,59 @@ def render_store_attendance(user_info):
     st.subheader("⏰ 월별 근무기록 관리")
     store_name = user_info['지점명']
 
-    st.markdown("""<style>
-        .stDataFrame th, .stDataFrame td { text-align: center !important; }
-        #summary-table .stDataFrame th[aria-colindex="1"], 
-        #summary-table .stDataFrame td[aria-colindex="1"] { text-align: left !important; }
-    </style>""", unsafe_allow_html=True)
-
     employees_df = load_data("직원마스터")
-    attendance_detail_df = load_data("근무기록_상세")
-
     store_employees_df = employees_df[(employees_df['소속지점'] == store_name) & (employees_df['재직상태'] == '재직중')]
-    
+
     if store_employees_df.empty:
         st.warning("먼저 '직원 정보' 탭에서 '재직중' 상태의 직원을 한 명 이상 등록해주세요.")
         return
 
-    selected_month_str = st.selectbox("관리할 년/월 선택", 
+    selected_month_str = st.selectbox("관리할 년/월 선택",
         options=[(date.today() - relativedelta(months=i)).strftime('%Y년 / %m월') for i in range(12)])
     selected_month = datetime.strptime(selected_month_str, '%Y년 / %m월')
     start_date = selected_month.date()
     end_date = (start_date + relativedelta(months=1)) - timedelta(days=1)
 
-    default_records = []
-    day_map = {'월': 0, '화': 1, '수': 2, '목': 3, '금': 4, '토': 5, '일': 6}
-    for dt in pd.date_range(start_date, end_date):
-        for _, emp in store_employees_df.iterrows():
-            if dt.weekday() in [day_map.get(d) for d in emp.get('근무요일', '').split(',')]:
-                default_records.append({
-                    "기록ID": f"default_{dt.strftime('%y%m%d')}_{emp['이름']}", "근무일자": dt.strftime('%Y-%m-%d'),
-                    "직원이름": emp['이름'], "구분": "정상근무", "출근시간": emp.get('기본출근', '09:00'),
-                    "퇴근시간": emp.get('기본퇴근', '18:00'), "비고": "자동 생성"
-                })
-    default_df = pd.DataFrame(default_records)
+    # --- 1. 선택된 월의 근무 기록 불러오기 ---
+    attendance_detail_df = load_data("근무기록_상세")
+    month_records_df = pd.DataFrame() # 빈 데이터프레임으로 초기화
 
     if not attendance_detail_df.empty and '근무일자' in attendance_detail_df.columns:
-        month_details = attendance_detail_df[
-            (pd.to_datetime(attendance_detail_df['근무일자'], errors='coerce').dt.strftime('%Y-%m') == selected_month.strftime('%Y-%m')) &
+        # 날짜 형식 통일 및 필터링
+        attendance_detail_df['근무일자'] = pd.to_datetime(attendance_detail_df['근무일자'], errors='coerce').dt.strftime('%Y-%m-%d')
+        month_records_df = attendance_detail_df[
+            (pd.to_datetime(attendance_detail_df['근무일자']).dt.strftime('%Y-%m') == selected_month.strftime('%Y-%m')) &
             (attendance_detail_df['지점명'] == store_name)
-        ]
-        
-        if not month_details.empty:
-            detail_keys = month_details.set_index(['근무일자', '직원이름']).index
-            default_df = default_df[~default_df.set_index(['근무일자', '직원이름']).index.isin(detail_keys)]
-        
-        final_df = pd.concat([default_df, month_details]).sort_values(by=['근무일자', '직원이름']).reset_index(drop=True)
-    else:
-        final_df = default_df
+        ].copy()
 
+    # --- 2. [로직 전면 개편] 월별 기록이 없으면 '기본 스케줄 생성' 버튼 표시 ---
+    if month_records_df.empty:
+        st.info(f"{selected_month_str}에 대한 근무 기록이 없습니다. 기본 스케줄을 생성해주세요.")
+        if st.button(f"🗓️ {selected_month_str} 기본 스케줄 생성하기", type="primary"):
+            new_records = []
+            day_map = {'월': 0, '화': 1, '수': 2, '목': 3, '금': 4, '토': 5, '일': 6}
+            for dt in pd.date_range(start_date, end_date):
+                for _, emp in store_employees_df.iterrows():
+                    if dt.weekday() in [day_map.get(d) for d in emp.get('근무요일', '').split(',')]:
+                        record_id = f"manual_{dt.strftime('%y%m%d')}_{emp['이름']}_{int(datetime.now().timestamp())}"
+                        new_records.append({
+                            "기록ID": record_id, "지점명": store_name, "근무일자": dt.strftime('%Y-%m-%d'),
+                            "직원이름": emp['이름'], "구분": "정상근무", "출근시간": emp.get('기본출근', '09:00'),
+                            "퇴근시간": emp.get('기본퇴근', '18:00'), "비고": "자동 생성"
+                        })
+            
+            if new_records:
+                new_df = pd.DataFrame(new_records)
+                # 전체 상세 기록과 합쳐서 업데이트
+                final_sheet_df = pd.concat([attendance_detail_df, new_df], ignore_index=True)
+                if update_sheet("근무기록_상세", final_sheet_df):
+                    st.success("기본 스케줄이 생성되었습니다. 페이지를 새로고침합니다.")
+                    st.rerun()
+            else:
+                st.warning("스케줄을 생성할 직원이 없습니다.")
+        return # 스케줄 생성 전까지는 아래 로직 실행 안 함
+
+    # --- 3. 근무 현황 표시 및 관리 (기록이 있는 경우) ---
     def calculate_duration(row):
         try:
             start_t = datetime.strptime(str(row['출근시간']), '%H:%M')
@@ -172,18 +173,17 @@ def render_store_attendance(user_info):
             duration = (end_t - start_t).total_seconds() / 3600
             return duration + 24 if duration < 0 else duration
         except (TypeError, ValueError): return 0
-    final_df['총시간'] = final_df.apply(calculate_duration, axis=1)
+    month_records_df['총시간'] = month_records_df.apply(calculate_duration, axis=1)
 
     st.markdown("##### 🗓️ **월별 근무 현황 요약**")
-    if not final_df.empty:
-        summary_pivot = final_df.pivot_table(index='직원이름', columns=pd.to_datetime(final_df['근무일자']).dt.day, values='총시간', aggfunc='sum')
-        st.dataframe(summary_pivot.style.format("{:.1f}", na_rep=""), use_container_width=True)
+    summary_pivot = month_records_df.pivot_table(index='직원이름', columns=pd.to_datetime(month_records_df['근무일자']).dt.day, values='총시간', aggfunc='sum')
+    st.dataframe(summary_pivot.style.format("{:.1f}", na_rep=""), use_container_width=True)
     
     st.markdown("---")
     st.markdown("##### ✍️ **일일 근무 기록 상세 관리**")
 
     selected_date = st.date_input("관리할 날짜 선택", value=start_date, min_value=start_date, max_value=end_date)
-    daily_records_df = final_df[final_df['근무일자'] == selected_date.strftime('%Y-%m-%d')].copy()
+    daily_records_df = month_records_df[month_records_df['근무일자'] == selected_date.strftime('%Y-%m-%d')].copy()
     daily_records_df.drop(columns=['총시간'], inplace=True, errors='ignore')
 
     st.info(f"**{selected_date.strftime('%Y년 %m월 %d일')}** 기록을 아래 표에서 직접 수정, 추가, 삭제하세요.")
@@ -196,7 +196,7 @@ def render_store_attendance(user_info):
             "출근시간": st.column_config.TextColumn("출근(HH:MM)", required=True),
             "퇴근시간": st.column_config.TextColumn("퇴근(HH:MM)", required=True),
         },
-        disabled=["기록ID", "근무일자"], hide_index=True
+        disabled=["기록ID", "지점명", "근무일자"], hide_index=True
     )
 
     if st.button(f"💾 {selected_date.strftime('%m월 %d일')} 기록 저장", type="primary", use_container_width=True):
@@ -209,33 +209,35 @@ def render_store_attendance(user_info):
         if invalid_rows:
             st.error(f"시간 형식이 잘못되었습니다 (HH:MM). 다음 직원의 시간을 확인해주세요: {', '.join(set(invalid_rows))}")
         else:
-            other_days_details = attendance_detail_df[attendance_detail_df['근무일자'] != selected_date.strftime('%Y-%m-%d')]
+            other_records = attendance_detail_df[attendance_detail_df['근무일자'] != selected_date.strftime('%Y-%m-%d')]
+            
             new_details_to_add = edited_df.copy()
             new_details_to_add['지점명'] = store_name
+            new_details_to_add['근무일자'] = selected_date.strftime('%Y-%m-%d')
             
             for i, row in new_details_to_add.iterrows():
-                if pd.isna(row.get('기록ID')) or 'default_' in str(row.get('기록ID')):
+                if pd.isna(row.get('기록ID')):
                     new_details_to_add.at[i, '기록ID'] = f"manual_{selected_date.strftime('%y%m%d')}_{row['직원이름']}_{int(datetime.now().timestamp()) + i}"
             
-            final_sheet_df = pd.concat([other_days_details, new_details_to_add], ignore_index=True)
+            final_sheet_df = pd.concat([other_records, new_details_to_add], ignore_index=True)
 
             if update_sheet("근무기록_상세", final_sheet_df):
                 st.success("변경사항이 성공적으로 저장되었습니다."); st.rerun()
 
     st.markdown("---")
     st.markdown("##### 📊 **직원별 근무 시간 집계**")
-    if not final_df.empty:
-        summary = final_df.pivot_table(index='직원이름', columns='구분', values='총시간', aggfunc='sum', fill_value=0)
-        required_cols = ['정상근무', '연장근무']
-        for col in required_cols:
-            if col not in summary.columns: summary[col] = 0
-        summary['총합'] = summary[required_cols].sum(axis=1)
-        display_summary = summary[required_cols + ['총합']].reset_index().rename(columns={'직원이름':'이름'})
-        
-        formatter = {'정상근무': '{:.1f} 시간', '연장근무': '{:.1f} 시간', '총합': '{:.1f} 시간'}
-        st.markdown('<div id="summary-table">', unsafe_allow_html=True)
-        st.dataframe(display_summary.style.format(formatter), use_container_width=True, hide_index=True)
-        st.markdown('</div>', unsafe_allow_html=True)
+    summary = month_records_df.pivot_table(index='직원이름', columns='구분', values='총시간', aggfunc='sum', fill_value=0)
+    required_cols = ['정상근무', '연장근무']
+    for col in required_cols:
+        if col not in summary.columns: summary[col] = 0
+    summary['총합'] = summary[required_cols].sum(axis=1)
+    display_summary = summary[required_cols + ['총합']].reset_index().rename(columns={'직원이름':'이름'})
+    
+    formatter = {'정상근무': '{:.1f} 시간', '연장근무': '{:.1f} 시간', '총합': '{:.1f} 시간'}
+    st.markdown('<div id="summary-table">', unsafe_allow_html=True)
+    st.dataframe(display_summary.style.format(formatter), use_container_width=True, hide_index=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
 
 def render_store_settlement(user_info):
     st.subheader("💰 정산 및 재고")
@@ -263,7 +265,7 @@ def render_store_settlement(user_info):
                 if sales_cash > 0: sales_data.append([log_date, store_name, '현금매출', sales_cash, log_date.strftime('%A')])
                 if sales_delivery > 0: sales_data.append([log_date, store_name, '배달매출', sales_delivery, log_date.strftime('%A')])
                 if exp_food > 0: expense_data.append([log_date, store_name, '식자재', '식자재 구매', exp_food, user_info['지점ID']])
-                if exp_sga_amount > 0: expense_data.append([log_date, store_name, '판관비', exp_sga_cat, exp_sga_amount, user_info['지점ID']])
+                if exp_sga_amount > 0: expense_data.append([log_date, store_name, '판관비', exp_sга_cat, exp_sga_amount, user_info['지점ID']])
 
                 if sales_data: append_rows("매출_로그", pd.DataFrame(sales_data, columns=['매출일자', '지점명', '매출유형', '금액', '요일']))
                 if expense_data: append_rows("일일정산_로그", pd.DataFrame(expense_data, columns=['정산일자', '지점명', '대분류', '소분류', '금액', '담당자']))
@@ -411,4 +413,3 @@ else:
         with store_tabs[0]: render_store_attendance(user_info)
         with store_tabs[1]: render_store_settlement(user_info)
         with store_tabs[2]: render_store_employee_info(user_info)
-
