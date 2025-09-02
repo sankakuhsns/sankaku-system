@@ -206,7 +206,6 @@ def render_store_attendance(user_info):
             return ''
 
         styler = timesheet.style
-        # [오류 수정] styler.map_apply -> styler.apply로 변경 및 람다 함수 수정
         for col_name in timesheet.columns:
             style_str = get_day_style(col_name)
             if style_str:
@@ -311,8 +310,15 @@ def render_store_attendance(user_info):
         
         display_summary = summary[required_cols + ['총합']].reset_index().rename(columns={'직원이름':'이름'})
         
+        # [오류 수정] format을 모든 열에 적용하지 않고, 숫자 열에만 적용하도록 변경
+        formatter = {
+            '정상근무': '{:.1f} 시간',
+            '연장근무': '{:.1f} 시간',
+            '총합': '{:.1f} 시간'
+        }
+        
         st.markdown('<div id="summary-table">', unsafe_allow_html=True)
-        st.dataframe(display_summary.style.format("{:.1f} 시간"), use_container_width=True, hide_index=True)
+        st.dataframe(display_summary.style.format(formatter), use_container_width=True, hide_index=True)
         st.markdown('</div>', unsafe_allow_html=True)
         
     else:
@@ -554,6 +560,7 @@ else:
         with store_tabs[0]: render_store_attendance(user_info)
         with store_tabs[1]: render_store_settlement(user_info)
         with store_tabs[2]: render_store_employee_info(user_info)
+
 
 
 
