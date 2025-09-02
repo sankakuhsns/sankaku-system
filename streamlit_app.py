@@ -246,15 +246,74 @@ def render_store_settlement(user_info):
                                '금액 (원)': [total_sales, cogs, gross_profit, sga_expenses, operating_profit]})
     st.table(summary_df.style.format({'금액 (원)': '{:,.0f}'}))
 
+# streamlit_app.py 파일에서 이 함수를 찾아 아래 코드로 교체하세요.
 
 def render_store_employee_info(user_info):
     st.subheader("👥 직원 정보")
     store_name = user_info['지점명']
     
-    employees_df = load_data("직원마스터")
-    store_employees_df = employees_df[(employees_df['소속지점'] == store_name) & (employees_df['재직상태'] == '재직중')]
+    # --- 1. 신규 직원 등록 UI (Expander와 Form 활용) ---
+    with st.expander("➕ 신규 직원 등록하기"):
+        with st.form("new_employee_form", clear_on_submit=True):
+            st.write("새로운 직원의 정보를 입력하세요.")
+            
+            # 직원마스터 시트의 모든 컬럼을 불러옴
+            employees_df = load_data("직원마스터")
+            
+            # 입력 필드
+            col1, col2 = st.columns(2)
+            with col1:
+                emp_name = st.text_input("이름")
+                emp_position = st.text_input("직책", "직원")
+                emp_contact = st.text_input("연락처")
+                emp_status = st.selectbox("재직상태", ["재직중", "퇴사"])
 
-    if store_employees_df.empty: st.info("등록된 직원 정보가 없습니다."); return
+            with col2:
+                emp_start_date = st.date_input("입사일", date.today())
+                emp_health_cert_date = st.date_input("보건증만료일", date.today() + timedelta(days=365))
+                emp_work_days = st.text_input("근무요일 (예: 월,화,수,목,금)")
+                
+            col3, col4 = st.columns(2)
+            with col3:
+                emp_start_time = st.text_input("기본출근 (HH:MM)", "09:00")
+            with col4:
+                emp_end_time = st.text_input("기본퇴근 (HH:MM)", "18:00")
+
+            # 저장 버튼
+            submitted = st.form_submit_button("💾 직원 정보 저장")
+            if submitted:
+                if not emp_name:
+                    st.error("직원 이름은 반드시 입력해야 합니다.")
+                else:
+                    # 직원ID 자동 생성 (예: 전대_홍길동_250902)
+                    emp_id = f"{store_name.replace('점','')}_{emp_name}_{emp_start_date.strftime('%y%m%d')}"
+                    
+                    new_employee_data = pd.DataFrame([{
+                        "직원ID": emp_id,
+                        "이름": emp_name,
+                        "소속지점": store_name,
+                        "직책": emp_position,
+                        "입사일": emp_start_date.strftime('%Y-%m-%d'),
+                        "연락처": emp_contact,
+                        "보건증만료일": emp_health_cert_date.strftime('%Y-%m-%d'),
+                        "재직상태": emp_status,
+                        "근무요일": emp_work_days,
+                        "기본출근": emp_start_time,
+                        "기본퇴근": emp_end_time
+                    }])
+
+                    if append_rows("직원마스터", new_employee_data):
+                        st.success(f"'{emp_name}' 직원의 정보가 성공적으로 등록되었습니다.")
+    
+    st.markdown("---")
+    
+    # --- 2. 기존 직원 정보 조회 및 보건증 알림 기능 (유지) ---
+    all_employees_df = load_data("직원마스터") # 최신 데이터를 다시 불러옴
+    store_employees_df = all_employees_df[(all_employees_df['소속지점'] == store_name) & (all_employees_df['재직상태'] == '재직중')]
+
+    if store_employees_df.empty:
+        st.info("등록된 재직중인 직원이 없습니다. 위에서 신규 직원을 등록해주세요.")
+        return
 
     store_employees_df['보건증만료일'] = pd.to_datetime(store_employees_df['보건증만료일'], errors='coerce')
     today = datetime.now()
@@ -264,12 +323,14 @@ def render_store_employee_info(user_info):
         if pd.notna(row['보건증만료일']) and today <= row['보건증만료일'] < (today + timedelta(days=30)):
              expiring_soon_list.append(f"- **{row['이름']}**: {row['보건증만료일'].strftime('%Y-%m-%d')} 만료 예정")
 
-    if expiring_soon_list: st.warning("🚨 보건증 만료 임박 직원\n" + "\n".join(expiring_soon_list))
+    if expiring_soon_list:
+        st.warning("🚨 보건증 만료 임박 직원\n" + "\n".join(expiring_soon_list))
 
-    st.markdown("---"); st.markdown("##### 우리 지점 직원 목록")
-    display_cols = ['이름', '직책', '입사일', '연락처', '보건증만료일']
-    st.dataframe(store_employees_df[display_cols].astype(str).replace('NaT',''), use_container_width=True, hide_index=True)
-
+    st.markdown("##### 우리 지점 직원 목록")
+    display_cols = ['이름', '직책', '입사일', '연락처', '보건증만료일', '근무요일', '기본출근', '기본퇴근']
+    # 화면에 표시할 때는 NaT(값이 없는 날짜)를 빈칸으로 보이게 처리
+    display_df = store_employees_df[display_cols].astype(str).replace('NaT', '')
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
 
 # =============================================================================
 # 3. 관리자 (Admin) 페이지 기능
@@ -326,3 +387,4 @@ else:
         with store_tabs[0]: render_store_attendance(user_info)
         with store_tabs[1]: render_store_settlement(user_info)
         with store_tabs[2]: render_store_employee_info(user_info)
+
