@@ -122,64 +122,22 @@ def login_screen():
 # 2. 지점 (Store) 페이지 기능
 # =============================================================================
 
+# streamlit_app.py 파일의 render_store_attendance 함수
+
 def render_store_attendance(user_info):
     st.subheader("⏰ 월별 근무기록")
     store_name = user_info['지점명']
 
     employees_df = load_data("직원마스터")
 
-    st.write(employees_df.columns.tolist()) # <--- 이 줄을 추가하여 컬럼명 확인
-    
+    # --- ↓↓↓ 문제 진단을 위해 이 두 줄을 추가하세요 ↓↓↓ ---
+    st.error("앱이 현재 인식하고 있는 '직원마스터' 시트의 컬럼명 목록입니다:")
+    st.write(employees_df.columns.tolist())
+    # --- ↑↑↑ 여기까지 추가 ---
+
     store_employees = employees_df[employees_df['소속지점'] == store_name]['이름'].tolist()
 
-    if not store_employees:
-        st.warning("먼저 '직원마스터' 시트에 해당 지점의 직원을 등록해주세요.")
-        return
-
-    today = date.today()
-    options = [(today - relativedelta(months=i)).strftime('%Y-%m') for i in range(12)]
-    selected_month_str = st.selectbox("근무 기록 년/월 선택", options=options)
-    
-    st.markdown("---")
-    st.markdown("##### 근무 기록 입력")
-
-    # 입력용 데이터프레임
-    col_config = {
-        "근무일자": st.column_config.DateColumn("근무일자", format="YYYY-MM-DD", required=True),
-        "직원 이름": st.column_config.SelectboxColumn("직원 이름", options=store_employees, required=True),
-        "출근 시간": st.column_config.TextColumn("출근 시간 (HH:MM)", required=True),
-        "퇴근 시간": st.column_config.TextColumn("퇴근 시간 (HH:MM)", required=True),
-    }
-    
-    if 'attendance_df' not in st.session_state:
-        st.session_state.attendance_df = pd.DataFrame(columns=col_config.keys())
-
-    edited_df = st.data_editor(st.session_state.attendance_df, num_rows="dynamic", use_container_width=True, column_config=col_config)
-
-    if st.button("💾 근무기록 저장", use_container_width=True, type="primary"):
-        if not edited_df.dropna().empty:
-            log_entries = []
-            is_valid = True
-            for _, row in edited_df.dropna().iterrows():
-                try:
-                    dt_str = row['근무일자'].strftime('%Y-%m-%d')
-                    clock_in = f"{dt_str} {row['출근 시간']}:00"
-                    clock_out = f"{dt_str} {row['퇴근 시간']}:00"
-                    log_entries.append([datetime.now(), store_name, row['직원 이름'], '출근', clock_in])
-                    log_entries.append([datetime.now(), store_name, row['직원 이름'], '퇴근', clock_out])
-                except Exception:
-                    st.error(f"'{row['직원 이름']}' 직원의 날짜 또는 시간 형식이 올바르지 않습니다 (HH:MM).")
-                    is_valid = False
-                    break
-            
-            if is_valid:
-                log_df = pd.DataFrame(log_entries, columns=['기록일시', '지점명', '직원이름', '출/퇴근', '근무시각'])
-                if append_rows("출근부_로그", log_df):
-                    st.success("근무기록이 성공적으로 저장되었습니다.")
-                    st.session_state.attendance_df = pd.DataFrame(columns=col_config.keys())
-                    st.rerun()
-        else:
-            st.warning("입력된 근무기록이 없습니다.")
+    #...(이하 코드 동일)...
 
 def render_store_settlement(user_info):
     st.subheader("💰 정산 및 재고")
@@ -428,4 +386,5 @@ else:
         with store_tabs[0]: render_store_attendance(user_info)
         with store_tabs[1]: render_store_settlement(user_info)
         with store_tabs[2]: render_store_employee_info(user_info)
+
 
