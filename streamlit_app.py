@@ -127,6 +127,9 @@ def render_store_attendance(user_info):
     store_name = user_info['지점명']
 
     employees_df = load_data("직원마스터")
+
+    st.write(employees_df.columns.tolist()) # <--- 이 줄을 추가하여 컬럼명 확인
+    
     store_employees = employees_df[employees_df['소속지점'] == store_name]['이름'].tolist()
 
     if not store_employees:
@@ -425,3 +428,4 @@ else:
         with store_tabs[0]: render_store_attendance(user_info)
         with store_tabs[1]: render_store_settlement(user_info)
         with store_tabs[2]: render_store_employee_info(user_info)
+
