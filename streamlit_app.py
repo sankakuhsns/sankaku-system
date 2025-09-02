@@ -1,5 +1,3 @@
-# streamlit_app.py
-
 import streamlit as st
 import gspread
 import pandas as pd
@@ -84,7 +82,7 @@ def check_health_cert_expiration(user_info):
     expiring_soon_list = []
     for _, row in store_employees_df.iterrows():
         if pd.notna(row['보건증만료일']) and today <= row['보건증만료일'] < (today + timedelta(days=30)):
-             expiring_soon_list.append(f"- **{row['이름']}**: {row['보건증만료일'].strftime('%Y-%m-%d')} 만료")
+            expiring_soon_list.append(f"- **{row['이름']}**: {row['보건증만료일'].strftime('%Y-%m-%d')} 만료")
     if expiring_soon_list:
         st.sidebar.warning("🚨 보건증 만료 임박\n" + "\n".join(expiring_soon_list))
 
@@ -470,13 +468,24 @@ def render_admin_dashboard():
 def render_admin_settlement_input():
     st.subheader("✍️ 월별 정산 입력")
     
-    today = datetime.now().date()
-    selected_month = st.date_input("정산할 월 선택", value=today, format="YYYY/MM")
+    # [수정된 부분]: st.date_input 대신 st.selectbox로 년/월 선택
+    today = datetime.now()
+    col1, col2 = st.columns(2)
     
+    with col1:
+        years = list(range(today.year - 2, today.year + 3))
+        selected_year = st.selectbox("정산할 년도 선택", options=years, index=years.index(today.year))
+    
+    with col2:
+        months = list(range(1, 13))
+        selected_month = st.selectbox("정산할 월 선택", options=months, index=months.index(today.month))
+    
+    selected_date_str = f"{selected_year}년 {selected_month}월"
+
     stores = ['전대점', '상무점', '수완점']
     selected_store = st.selectbox("지점 선택", stores)
     
-    st.markdown(f"**{selected_store}**의 **{selected_month.strftime('%Y년 %m월')}** 지출 내역")
+    st.markdown(f"**{selected_store}**의 **{selected_date_str}** 지출 내역")
     
     # 예시 데이터 (실제로는 DB에서 불러와야 함)
     settlement_df = pd.DataFrame({
@@ -584,6 +593,3 @@ else:
         with store_tabs[0]: render_store_attendance(user_info)
         with store_tabs[1]: render_store_settlement(user_info)
         with store_tabs[2]: render_store_employee_info(user_info)
-
-
-
