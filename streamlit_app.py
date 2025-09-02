@@ -195,24 +195,30 @@ def render_store_attendance(user_info):
         
         timesheet.index.name = '이름'
 
-        def style_day_columns(df):
-            style = pd.DataFrame('', index=df.index, columns=df.columns)
-            for day_str in df.columns:
-                try:
-                    day = int(day_str.replace('일', ''))
-                    current_date = date(selected_month.year, selected_month.month, day)
-                    if current_date in kr_holidays: style[day_str] = 'background-color: #ffe0e0'
-                    elif current_date.weekday() == 6: style[day_str] = 'background-color: #ffefef'
-                    elif current_date.weekday() == 5: style[day_str] = 'background-color: #f0f5ff'
-                except ValueError: continue
-            return style
+        # [오류 수정] 스타일 적용 함수 변경
+        def get_day_style(col_name):
+            try:
+                day = int(col_name.replace('일', ''))
+                current_date = date(selected_month.year, selected_month.month, day)
+                if current_date in kr_holidays: return 'background-color: #ffe0e0'
+                if current_date.weekday() == 6: return 'background-color: #ffefef'
+                if current_date.weekday() == 5: return 'background-color: #f0f5ff'
+            except (ValueError, TypeError): pass
+            return None
+
+        styler = timesheet.style
+        for col in timesheet.columns:
+            style = get_day_style(col)
+            if style:
+                styler.map_apply(lambda val: style, subset=[col])
         
         def format_hours(val):
-            if pd.isna(val):
-                return ""
+            if pd.isna(val): return ""
             return f"{val:.1f}"
+        
+        styler.format(format_hours)
+        st.dataframe(styler, use_container_width=True)
 
-        st.dataframe(timesheet.style.apply(style_day_columns, axis=None).applymap(format_hours), use_container_width=True)
     else: st.info(f"{selected_month_str_display}에 대한 근무 스케줄 정보가 없습니다.")
     
     st.markdown("---")
@@ -242,47 +248,59 @@ def render_store_attendance(user_info):
                 is_overlap = False
                 new_start_dt = datetime.combine(work_date, start_time_val)
                 new_end_dt = datetime.combine(work_date, end_time_val)
+                if new_end_dt <= new_start_dt: new_end_dt += timedelta(days=1)
+                
                 record_id = f"{work_date.strftime('%y%m%d')}_{store_name}_{emp_name}"
                 
-                if not final_df.empty:
-                    existing_records = final_df[
-                        (final_df['직원이름'] == emp_name) &
-                        (final_df['근무일자'] == work_date.strftime('%Y-%m-%d')) &
-                        (final_df['기록ID'] != record_id)
-                    ]
-                    for _, row in existing_records.iterrows():
-                        try:
-                            existing_start_dt = datetime.combine(work_date, datetime.strptime(row['출근시간'], '%H:%M').time())
-                            existing_end_dt = datetime.combine(work_date, datetime.strptime(row['퇴근시간'], '%H:%M').time())
-                            if new_start_dt < existing_end_dt and existing_start_dt < new_end_dt:
-                                is_overlap = True
-                                st.error(f"입력한 시간이 기존 기록({row['구분']}: {row['출근시간']}~{row['퇴근시간']})과 겹칩니다.")
-                                break
-                        except: continue
+                # [개선] 중복 방지 로직 강화
+                # final_df에는 화면에 보이는 모든 기록이 포함되어 있음 (자동생성+상세기록)
+                existing_records = final_df[
+                    (final_df['직원이름'] == emp_name) &
+                    (final_df['근무일자'] == work_date.strftime('%Y-%m-%d')) &
+                    (final_df['기록ID'] != record_id)
+                ]
+                for _, row in existing_records.iterrows():
+                    try:
+                        existing_start_dt = datetime.combine(work_date, datetime.strptime(row['출근시간'], '%H:%M').time())
+                        existing_end_dt = datetime.combine(work_date, datetime.strptime(row['퇴근시간'], '%H:%M').time())
+                        if existing_end_dt <= existing_start_dt: existing_end_dt += timedelta(days=1)
+                        
+                        if new_start_dt < existing_end_dt and existing_start_dt < new_end_dt:
+                            is_overlap = True
+                            st.error(f"입력한 시간이 기존 기록({row['구분']}: {row['출근시간']}~{row['퇴근시간']})과 겹칩니다.")
+                            break
+                    except (ValueError, TypeError): continue
 
                 if not is_overlap:
                     try:
                         duration = (new_end_dt - new_start_dt).total_seconds() / 3600
-                        if duration < 0: duration += 24
-                        
                         new_record = pd.DataFrame([{"기록ID": record_id, "지점명": store_name, "근무일자": work_date.strftime('%Y-%m-%d'), "직원이름": emp_name, "구분": work_type, "출근시간": start_time_val.strftime('%H:%M'), "퇴근시간": end_time_val.strftime('%H:%M'), "총시간": duration, "비고": notes}])
                         
-                        if not attendance_detail_df.empty:
-                            attendance_detail_df = attendance_detail_df[attendance_detail_df['기록ID'] != record_id]
-                        final_df_to_save = pd.concat([attendance_detail_df, new_record], ignore_index=True)
+                        # [개선] 통상근무 수정 로직 명확화
+                        # 구글 시트 원본(attendance_detail_df)에서 해당 ID를 제거하고 새 기록을 추가
+                        current_detail_df = load_data("근무기록_상세") # 최신 데이터 다시 로드
+                        if not current_detail_df.empty:
+                            current_detail_df = current_detail_df[current_detail_df['기록ID'] != record_id]
+                        
+                        final_df_to_save = pd.concat([current_detail_df, new_record], ignore_index=True)
                         
                         if update_sheet("근무기록_상세", final_df_to_save):
                             st.success(f"{emp_name} 직원의 {work_date.strftime('%Y-%m-%d')} 근무기록이 저장되었습니다."); st.rerun()
                     except Exception as e: st.error(f"저장 중 오류 발생: {e}. 입력값을 확인해주세요.")
 
             if deleted:
+                # [개선] 삭제 로직 -> 결근 처리로 변경
                 record_id_to_delete = f"{work_date.strftime('%y%m%d')}_{store_name}_{emp_name}"
-                if not attendance_detail_df.empty and record_id_to_delete in attendance_detail_df['기록ID'].values:
-                    final_df_to_save = attendance_detail_df[attendance_detail_df['기록ID'] != record_id_to_delete]
-                    if update_sheet("근무기록_상세", final_df_to_save):
-                        st.success(f"{emp_name} 직원의 {work_date.strftime('%Y-%m-%d')} 근무기록이 삭제되었습니다."); st.rerun()
-                else:
-                    st.warning("삭제할 기존 근무기록이 없습니다.")
+                deleted_record = pd.DataFrame([{"기록ID": record_id_to_delete, "지점명": store_name, "근무일자": work_date.strftime('%Y-%m-%d'), "직원이름": emp_name, "구분": "결근", "출근시간": "00:00", "퇴근시간": "00:00", "총시간": 0, "비고": "사용자 삭제 처리"}])
+
+                current_detail_df = load_data("근무기록_상세")
+                if not current_detail_df.empty:
+                    current_detail_df = current_detail_df[current_detail_df['기록ID'] != record_id_to_delete]
+                
+                final_df_to_save = pd.concat([current_detail_df, deleted_record], ignore_index=True)
+
+                if update_sheet("근무기록_상세", final_df_to_save):
+                    st.success(f"{emp_name} 직원의 {work_date.strftime('%Y-%m-%d')} 근무기록이 삭제(결근 처리)되었습니다."); st.rerun()
 
     st.markdown("---")
     st.markdown("##### 📊 **직원별 근무 시간 집계**")
@@ -541,6 +559,7 @@ else:
         with store_tabs[0]: render_store_attendance(user_info)
         with store_tabs[1]: render_store_settlement(user_info)
         with store_tabs[2]: render_store_employee_info(user_info)
+
 
 
 
