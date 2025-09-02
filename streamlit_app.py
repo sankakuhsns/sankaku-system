@@ -177,7 +177,6 @@ def render_store_attendance(user_info):
         timesheet = timesheet.reindex(columns=all_days_cols)
         timesheet.index.name = '이름'
 
-        # 스타일링 및 포맷팅
         kr_holidays = holidays.KR(years=selected_month.year)
         def get_day_style(col_name):
             try:
@@ -202,7 +201,7 @@ def render_store_attendance(user_info):
 
     st.markdown("---")
 
-    # 4. [개선] 기록 추가/수정/삭제 폼 (UX 개선)
+    # 4. [오류 수정] 기록 추가/수정/삭제 폼 구조 변경
     with st.expander("✍️ **상세 근무 기록 추가/수정/삭제**"):
         
         # --- Form Auto-fill Logic ---
@@ -215,34 +214,34 @@ def render_store_attendance(user_info):
             record = final_df[(final_df['직원이름'] == emp_name) & (final_df['근무일자'] == work_date.strftime('%Y-%m-%d'))]
             
             if not record.empty:
-                # 여러 기록이 있을 경우 마지막 기록을 기준으로 폼 채우기
                 latest_record = record.iloc[-1]
                 st.session_state.att_record_id = latest_record.get('기록ID', '')
                 st.session_state.att_work_type = latest_record.get('구분', '정상근무')
                 st.session_state.att_start_time = datetime.strptime(latest_record.get('출근시간', '09:00'), '%H:%M').time()
                 st.session_state.att_end_time = datetime.strptime(latest_record.get('퇴근시간', '18:00'), '%H:%M').time()
                 st.session_state.att_notes = latest_record.get('비고', '')
-            else: # 해당 날짜에 기록이 없으면 기본값으로 리셋
+            else:
                 emp_info = store_employees_df[store_employees_df['이름'] == emp_name].iloc[0]
                 st.session_state.att_record_id = ''
                 st.session_state.att_work_type = '정상근무'
                 st.session_state.att_start_time = datetime.strptime(emp_info.get('기본출근', '09:00'), '%H:%M').time()
                 st.session_state.att_end_time = datetime.strptime(emp_info.get('기본퇴근', '18:00'), '%H:%M').time()
                 st.session_state.att_notes = ''
-
-        # --- Form UI ---
+        
+        # --- [오류 수정] 선택 위젯을 폼 밖으로 분리 ---
+        col1, col2 = st.columns(2)
+        emp_name_selected = col1.selectbox("직원 선택", options=store_employees_df['이름'].tolist(), key="att_emp_name_select", on_change=load_record_for_form)
+        work_date_selected = col2.date_input("날짜 선택", selected_month.date(), key="att_work_date_select", on_change=load_record_for_form)
+        
+        st.info("직원이나 날짜를 변경하면 가장 최근 기록을 불러옵니다.")
+        
+        # --- 폼 UI ---
         with st.form("attendance_detail_form"):
-            col1, col2 = st.columns(2)
-            emp_name = col1.selectbox("직원 선택", options=store_employees_df['이름'].tolist(), key="att_emp_name_select", on_change=load_record_for_form)
-            work_date = col2.date_input("날짜 선택", selected_month.date(), key="att_work_date_select", on_change=load_record_for_form)
-            
-            st.info("직원이나 날짜를 변경하면 가장 최근 기록을 불러옵니다.")
-
             work_type = st.selectbox("근무 유형", ["정상근무", "연장근무", "유급휴가", "무급휴가", "결근"], key="att_work_type")
             
-            col4, col5 = st.columns(2)
-            start_time_val = col4.time_input("출근 시간", key="att_start_time")
-            end_time_val = col5.time_input("퇴근 시간", key="att_end_time")
+            f_col1, f_col2 = st.columns(2)
+            start_time_val = f_col1.time_input("출근 시간", key="att_start_time")
+            end_time_val = f_col2.time_input("퇴근 시간", key="att_end_time")
             notes = st.text_input("비고", key="att_notes")
 
             b_col1, b_col2 = st.columns(2)
@@ -250,10 +249,10 @@ def render_store_attendance(user_info):
             deleted = b_col2.form_submit_button("🗑️ 선택 기록 삭제", use_container_width=True)
 
             if submitted:
-                start_time_str = start_time_val.strftime('%H:%M')
-                end_time_str = end_time_val.strftime('%H:%M')
-                
-                # [개선] 고유 ID 생성 (타임스탬프 사용)
+                # 폼 밖에서 선택된 값을 사용
+                emp_name = emp_name_selected
+                work_date = work_date_selected
+
                 record_id = st.session_state.get('att_record_id', '')
                 if not record_id or 'default_' in record_id:
                      record_id = f"{work_date.strftime('%y%m%d')}_{store_name}_{emp_name}_{int(datetime.now().timestamp())}"
@@ -262,7 +261,6 @@ def render_store_attendance(user_info):
                 new_end_dt = datetime.combine(work_date, end_time_val)
                 if new_end_dt <= new_start_dt: new_end_dt += timedelta(days=1)
                 
-                # 중복 검사
                 is_overlap = False
                 existing_records = final_df[(final_df['직원이름'] == emp_name) & (final_df['근무일자'] == work_date.strftime('%Y-%m-%d')) & (final_df['기록ID'] != record_id)]
                 for _, row in existing_records.iterrows():
@@ -276,9 +274,8 @@ def render_store_attendance(user_info):
 
                 if not is_overlap:
                     duration = (new_end_dt - new_start_dt).total_seconds() / 3600
-                    new_record = pd.DataFrame([{"기록ID": record_id, "지점명": store_name, "근무일자": work_date.strftime('%Y-%m-%d'), "직원이름": emp_name, "구분": work_type, "출근시간": start_time_str, "퇴근시간": end_time_str, "총시간": duration, "비고": notes}])
+                    new_record = pd.DataFrame([{"기록ID": record_id, "지점명": store_name, "근무일자": work_date.strftime('%Y-%m-%d'), "직원이름": emp_name, "구분": work_type, "출근시간": start_time_val.strftime('%H:%M'), "퇴근시간": end_time_val.strftime('%H:%M'), "총시간": duration, "비고": notes}])
                     
-                    # [개선] 효율적 데이터 처리: 기존 DF에서 수정 후 한번에 업데이트
                     df_to_save = attendance_detail_df[attendance_detail_df['기록ID'] != record_id]
                     df_to_save = pd.concat([df_to_save, new_record], ignore_index=True)
                     
@@ -286,11 +283,12 @@ def render_store_attendance(user_info):
                         st.success(f"{emp_name} 직원의 {work_date.strftime('%Y-%m-%d')} 근무기록이 저장되었습니다."); st.rerun()
 
             if deleted:
+                emp_name = emp_name_selected
+                work_date = work_date_selected
                 record_id_to_delete = st.session_state.get('att_record_id', '')
                 if not record_id_to_delete or 'default_' in record_id_to_delete:
                     st.warning("자동 생성된 기본 근무기록은 삭제할 수 없습니다. (수정/덮어쓰기만 가능)")
                 else:
-                    # [개선] 직관적 삭제: 상세 기록 시트에서 실제로 행을 제거
                     df_to_save = attendance_detail_df[attendance_detail_df['기록ID'] != record_id_to_delete]
                     if update_sheet("근무기록_상세", df_to_save):
                         st.success(f"{emp_name} 직원의 {work_date.strftime('%Y-%m-%d')} 상세 기록이 삭제되었습니다."); st.rerun()
@@ -549,6 +547,7 @@ else:
         with store_tabs[0]: render_store_attendance(user_info)
         with store_tabs[1]: render_store_settlement(user_info)
         with store_tabs[2]: render_store_employee_info(user_info)
+
 
 
 
