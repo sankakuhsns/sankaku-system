@@ -102,8 +102,6 @@ def login_screen():
 # 2. 지점 (Store) 페이지 기능
 # =============================================================================
 
-# streamlit_app.py 파일에서 이 함수를 찾아 아래 코드로 교체하세요.
-
 def render_store_attendance(user_info):
     st.subheader("⏰ 월별 근무기록")
     store_name = user_info['지점명']
@@ -115,7 +113,6 @@ def render_store_attendance(user_info):
         st.warning("먼저 '직원마스터' 시트에 해당 지점의 재직중인 직원을 등록해주세요.")
         return
 
-    # --- 1. 스케줄 자동 생성을 위한 준비 ---
     if '근무요일' not in store_employees_df.columns:
         st.error("'직원마스터' 시트에 '근무요일', '기본출근', '기본퇴근' 컬럼을 추가해야 합니다.")
         return
@@ -129,13 +126,11 @@ def render_store_attendance(user_info):
     st.markdown("##### 🗓️ 근무 스케줄 관리")
     st.info("직원의 고정 스케줄을 바탕으로 기본 근무표가 자동 생성됩니다. 휴가, 연장근무 등 변경된 내용만 수정하세요.")
 
-    # --- 2. 월별 기본 근무표 자동 생성 로직 ---
-    @st.cache_data(ttl=3600) # 스케줄은 1시간 동안 캐시
+    @st.cache_data(ttl=3600)
     def generate_schedule(year, month, employees):
         schedule_entries = []
         start_date = date(year, month, 1)
         end_date = start_date + relativedelta(months=1) - timedelta(days=1)
-        
         day_map = {'월': 0, '화': 1, '수': 2, '목': 3, '금': 4, '토': 5, '일': 6}
 
         for single_date in pd.date_range(start_date, end_date):
@@ -151,7 +146,6 @@ def render_store_attendance(user_info):
                     })
         return pd.DataFrame(schedule_entries)
 
-    # st.data_editor는 상태 유지가 중요하므로 세션 상태 활용
     schedule_key = f"schedule_{selected_month.strftime('%Y-%m')}"
     if schedule_key not in st.session_state:
         st.session_state[schedule_key] = generate_schedule(selected_month.year, selected_month.month, store_employees_df)
@@ -164,13 +158,8 @@ def render_store_attendance(user_info):
         "비고": st.column_config.TextColumn("비고"),
     }
     
-    final_schedule_df = st.data_editor(
-        st.session_state[schedule_key],
-        num_rows="dynamic",
-        use_container_width=True,
-        column_config=col_config,
-        key=f"editor_{schedule_key}"
-    )
+    final_schedule_df = st.data_editor(st.session_state[schedule_key], num_rows="dynamic",
+        use_container_width=True, column_config=col_config, key=f"editor_{schedule_key}")
 
     if st.button("✅ 이달 근무기록 최종 확정", use_container_width=True, type="primary"):
         df_to_save = final_schedule_df.dropna(subset=['일', '직원 이름', '출근 시간', '퇴근 시간']).reset_index(drop=True)
@@ -187,30 +176,99 @@ def render_store_attendance(user_info):
                     log_entries.append([datetime.now(), store_name, row['직원 이름'], '출근', f"{full_date_str} {in_time}:00"])
                     log_entries.append([datetime.now(), store_name, row['직원 이름'], '퇴근', f"{full_date_str} {out_time}:00"])
                 except Exception:
-                    st.error(f"{index + 1}번째 행의 날짜 또는 시간 형식이 올바르지 않습니다.")
-                    is_valid = False; break
+                    st.error(f"{index + 1}번째 행의 날짜 또는 시간 형식이 올바르지 않습니다."); is_valid = False; break
             
             if is_valid:
-                # !중요! 저장 전, 해당 월의 기존 기록을 삭제하여 중복 방지 (선택적 기능)
-                # 이 기능을 구현하려면 gspread의 delete_rows() 등을 사용한 복잡한 로직이 필요.
-                # 우선은 append만으로 구현하고, 필요시 고도화.
                 log_df = pd.DataFrame(log_entries, columns=['기록일시', '지점명', '직원이름', '출/퇴근', '근무시각'])
                 if append_rows("출근부_로그", log_df):
                     st.success(f"{selected_month_str_display} 근무기록이 성공적으로 저장(확정)되었습니다.")
-                    del st.session_state[schedule_key] # 저장 후 캐시 삭제
+                    del st.session_state[schedule_key]
                     st.rerun()
-        else:
-            st.warning("확정할 근무기록이 없습니다.")
+        else: st.warning("확정할 근무기록이 없습니다.")
+
 
 def render_store_settlement(user_info):
-    # (이전 코드와 동일)
     st.subheader("💰 정산 및 재고")
-    st.info("월말 재고 입력 및 정산표 확인 기능이 여기에 구현될 예정입니다.")
+    store_name = user_info['지점명']
+    
+    today = date.today()
+    options = [(today - relativedelta(months=i)).strftime('%Y-%m') for i in range(12)]
+    
+    with st.expander("월말 재고 자산 평가액 입력", expanded=True):
+        selected_month_inv = st.selectbox("재고 평가 년/월 선택", options=options, key="inv_month")
+        inventory_value = st.number_input("해당 월의 최종 재고 평가액(원)을 입력하세요.", min_value=0, step=10000)
+
+        if st.button("💾 재고액 저장", type="primary"):
+            inventory_log_df = load_data("월말재고_로그")
+            if '평가년월' in inventory_log_df.columns:
+                 inventory_log_df['평가년월'] = pd.to_datetime(inventory_log_df['평가년월']).dt.strftime('%Y-%m')
+            
+            existing_indices = inventory_log_df[(inventory_log_df['평가년월'] == selected_month_inv) & (inventory_log_df['지점명'] == store_name)].index
+            
+            if not existing_indices.empty:
+                inventory_log_df.loc[existing_indices, ['재고평가액', '입력일시']] = [inventory_value, datetime.now()]
+            else:
+                new_row = pd.DataFrame([{'평가년월': selected_month_inv, '지점명': store_name, '재고평가액': inventory_value, '입력일시': datetime.now(), '입력자': user_info['지점ID']}])
+                inventory_log_df = pd.concat([inventory_log_df, new_row], ignore_index=True)
+            
+            if update_sheet("월말재고_로그", inventory_log_df):
+                st.success(f"{selected_month_inv}의 재고 평가액이 {inventory_value:,.0f}원으로 저장되었습니다.")
+
+    st.markdown("---")
+    st.markdown("##### 🧾 최종 정산표 확인")
+    selected_month_pl = st.selectbox("정산표 조회 년/월 선택", options=options, key="pl_month")
+    
+    sales_log = load_data("매출_로그"); settlement_log = load_data("일일정산_로그"); inventory_log = load_data("월말재고_로그")
+
+    if sales_log.empty or settlement_log.empty or inventory_log.empty:
+        st.warning("정산표를 생성하기 위한 데이터(매출, 지출, 재고)가 부족합니다."); return
+
+    selected_dt = datetime.strptime(selected_month_pl, '%Y-%m'); prev_month_str = (selected_dt - relativedelta(months=1)).strftime('%Y-%m')
+
+    sales_log['매출일자'] = pd.to_datetime(sales_log['매출일자'], errors='coerce').dt.strftime('%Y-%m')
+    settlement_log['정산일자'] = pd.to_datetime(settlement_log['정산일자'], errors='coerce').dt.strftime('%Y-%m')
+    inventory_log['평가년월'] = pd.to_datetime(inventory_log['평가년월'], errors='coerce').dt.strftime('%Y-%m')
+    
+    total_sales = sales_log[(sales_log['매출일자'] == selected_month_pl) & (sales_log['지점명'] == store_name)]['금액'].sum()
+    store_settlement = settlement_log[(settlement_log['정산일자'] == selected_month_pl) & (settlement_log['지점명'] == store_name)]
+    food_purchase = store_settlement[store_settlement['대분류'] == '식자재']['금액'].sum()
+    sga_expenses = store_settlement[store_settlement['대분류'] != '식자재']['금액'].sum()
+    
+    begin_inv_series = inventory_log[(inventory_log['평가년월'] == prev_month_str) & (inventory_log['지점명'] == store_name)]['재고평가액']
+    end_inv_series = inventory_log[(inventory_log['평가년월'] == selected_month_pl) & (inventory_log['지점명'] == store_name)]['재고평가액']
+
+    begin_inv = begin_inv_series.iloc[0] if not begin_inv_series.empty else 0
+    end_inv = end_inv_series.iloc[0] if not end_inv_series.empty else 0
+    
+    cogs = begin_inv + food_purchase - end_inv; gross_profit = total_sales - cogs; operating_profit = gross_profit - sga_expenses
+    
+    summary_df = pd.DataFrame({'항목': ['I. 총매출', 'II. 식자재 원가 (COGS)', 'III. 매출 총이익', 'IV. 판매비와 관리비', 'V. 영업이익'],
+                               '금액 (원)': [total_sales, cogs, gross_profit, sga_expenses, operating_profit]})
+    st.table(summary_df.style.format({'금액 (원)': '{:,.0f}'}))
+
 
 def render_store_employee_info(user_info):
-    # (이전 코드와 동일)
     st.subheader("👥 직원 정보")
-    st.info("직원 정보 및 보건증 만료일 확인 기능이 여기에 구현될 예정입니다.")
+    store_name = user_info['지점명']
+    
+    employees_df = load_data("직원마스터")
+    store_employees_df = employees_df[(employees_df['소속지점'] == store_name) & (employees_df['재직상태'] == '재직중')]
+
+    if store_employees_df.empty: st.info("등록된 직원 정보가 없습니다."); return
+
+    store_employees_df['보건증만료일'] = pd.to_datetime(store_employees_df['보건증만료일'], errors='coerce')
+    today = datetime.now()
+    
+    expiring_soon_list = []
+    for _, row in store_employees_df.iterrows():
+        if pd.notna(row['보건증만료일']) and today <= row['보건증만료일'] < (today + timedelta(days=30)):
+             expiring_soon_list.append(f"- **{row['이름']}**: {row['보건증만료일'].strftime('%Y-%m-%d')} 만료 예정")
+
+    if expiring_soon_list: st.warning("🚨 보건증 만료 임박 직원\n" + "\n".join(expiring_soon_list))
+
+    st.markdown("---"); st.markdown("##### 우리 지점 직원 목록")
+    display_cols = ['이름', '직책', '입사일', '연락처', '보건증만료일']
+    st.dataframe(store_employees_df[display_cols].astype(str).replace('NaT',''), use_container_width=True, hide_index=True)
 
 
 # =============================================================================
@@ -218,23 +276,22 @@ def render_store_employee_info(user_info):
 # =============================================================================
 
 def render_admin_dashboard():
-    # (이전 코드와 동일)
     st.subheader("📊 통합 대시보드")
     st.info("전체 지점 데이터 종합 대시보드 기능이 여기에 구현될 예정입니다.")
 
 def render_admin_settlement_input():
-    # (이전 코드와 동일)
     st.subheader("✍️ 월별 정산 입력")
+    # (이전 코드와 동일)
     st.info("월별/지점별 지출 내역 입력 기능이 여기에 구현될 예정입니다.")
 
 def render_admin_employee_management():
-    # (이전 코드와 동일)
     st.subheader("🗂️ 전 직원 관리")
+    # (이전 코드와 동일)
     st.info("전체 직원 정보, 출근부, 보건증 현황 관리 기능이 여기에 구현될 예정입니다.")
 
 def render_admin_settings():
-    # (이전 코드와 동일)
     st.subheader("⚙️ 데이터 및 설정")
+    # (이전 코드와 동일)
     st.info("OKPOS 파일 업로드, 지점 계정 관리 기능이 여기에 구현될 예정입니다.")
 
 
@@ -242,21 +299,18 @@ def render_admin_settings():
 # 4. 메인 실행 로직
 # =============================================================================
 
-if 'logged_in' not in st.session_state:
-    st.session_state['logged_in'] = False
+if 'logged_in' not in st.session_state: st.session_state['logged_in'] = False
 
 if not st.session_state['logged_in']:
     login_screen()
 else:
     user_info = st.session_state['user_info']
-    role = user_info.get('역할', 'store')
-    name = user_info.get('지점명', '사용자')
+    role = user_info.get('역할', 'store'); name = user_info.get('지점명', '사용자')
     
     st.sidebar.success(f"**{name}** ({role})님")
     st.sidebar.markdown("---")
     if st.sidebar.button("로그아웃"):
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
+        for key in list(st.session_state.keys()): del st.session_state[key]
         st.rerun()
 
     if role == 'admin':
@@ -272,5 +326,3 @@ else:
         with store_tabs[0]: render_store_attendance(user_info)
         with store_tabs[1]: render_store_settlement(user_info)
         with store_tabs[2]: render_store_employee_info(user_info)
-
-
