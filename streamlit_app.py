@@ -113,6 +113,37 @@ def render_store_attendance(user_info):
     st.subheader("⏰ 월별 근무기록 관리")
     store_name = user_info['지점명']
 
+    # --- UI 개선을 위한 CSS 스타일 주입 ---
+    st.markdown("""
+    <style>
+        /* 데이터프레임의 모든 셀 가운데 정렬 */
+        .stDataFrame div[data-testid="stHorizontalBlock"] > div {
+            display: flex;
+            justify-content: center;
+        }
+        .stDataFrame th, .stDataFrame td {
+            text-align: center !important;
+        }
+        /* 근무 현황표의 날짜(일) 컬럼 폭 조절 */
+        .stDataFrame th[aria-colindex^="2"], .stDataFrame td[aria-colindex^="2"] {
+             min-width: 45px !important;
+             max-width: 45px !important;
+        }
+        /* 근무 현황표의 이름 컬럼 폭 조절 */
+        .stDataFrame th[aria-colindex="1"], .stDataFrame td[aria-colindex="1"] {
+             min-width: 90px !important;
+             max-width: 90px !important;
+             text-align: left !important; /* 이름은 좌측 정렬 */
+        }
+        /* 직원별 집계표 컬럼 너비 동일하게 설정 */
+        #summary-table .stDataFrame th, #summary-table .stDataFrame td {
+            width: 150px !important;
+            text-align: center !important;
+        }
+    </style>
+    """, unsafe_allow_html=True)
+
+
     employees_df = load_data("직원마스터")
     store_employees_df = employees_df[(employees_df['소속지점'] == store_name) & (employees_df['재직상태'] == '재직중')]
     if store_employees_df.empty:
@@ -159,19 +190,28 @@ def render_store_attendance(user_info):
     # (4) 근무 현황표(Pivot Table) 생성 및 표시
     if not final_df.empty:
         timesheet = final_df.pivot_table(index='직원이름', columns=pd.to_datetime(final_df['근무일자']).dt.day, values='총시간', aggfunc='sum')
+        
+        # [개선] 1일부터 월말까지 모든 날짜 컬럼 생성
+        all_days_cols = [f"{day}일" for day in range(1, end_date.day + 1)]
         timesheet.columns = [f"{col}일" for col in timesheet.columns]
+        timesheet = timesheet.reindex(columns=all_days_cols)
+        
+        # [개선] 인덱스 이름 변경
+        timesheet.index.name = '이름'
+
         def style_day_columns(df):
             style = pd.DataFrame('', index=df.index, columns=df.columns)
-            last_day = (selected_month.replace(day=1) + relativedelta(months=1) - timedelta(days=1)).day
-            for day in range(1, last_day + 1):
+            for day_str in df.columns:
                 try:
-                    current_date = date(selected_month.year, selected_month.month, day); col_name = f"{day}일"
-                    if col_name in df.columns:
-                        if current_date in kr_holidays: style[col_name] = 'background-color: #ffe0e0' # 공휴일
-                        elif current_date.weekday() == 6: style[col_name] = 'background-color: #ffefef' # 일요일
-                        elif current_date.weekday() == 5: style[col_name] = 'background-color: #f0f5ff' # 토요일
+                    day = int(day_str.replace('일', ''))
+                    current_date = date(selected_month.year, selected_month.month, day)
+                    if current_date in kr_holidays: style[day_str] = 'background-color: #ffe0e0' # 공휴일
+                    elif current_date.weekday() == 6: style[day_str] = 'background-color: #ffefef' # 일요일
+                    elif current_date.weekday() == 5: style[day_str] = 'background-color: #f0f5ff' # 토요일
                 except ValueError: continue
             return style
+        
+        # [개선] na_rep="" 로 빈칸 처리
         st.dataframe(timesheet.style.apply(style_day_columns, axis=None).format("{:.1f}", na_rep=""), use_container_width=True)
     else: st.info(f"{selected_month_str_display}에 대한 근무 스케줄 정보가 없습니다.")
     
@@ -199,29 +239,35 @@ def render_store_attendance(user_info):
             deleted = b_col2.form_submit_button("🗑️ 선택 날짜 기록 삭제", use_container_width=True)
 
             if submitted:
-                # [개선] 동일 시간 & 다른 유형 중복 등록 방지
-                is_duplicate = False
+                # [개선] 시간 중복 등록 방지 로직
+                is_overlap = False
+                new_start_dt = datetime.combine(work_date, start_time_val)
+                new_end_dt = datetime.combine(work_date, end_time_val)
+                record_id = f"{work_date.strftime('%y%m%d')}_{store_name}_{emp_name}"
+
                 if not final_df.empty:
+                    # 같은 날, 같은 직원의 다른 기록들을 확인
                     existing_records = final_df[
                         (final_df['직원이름'] == emp_name) &
                         (final_df['근무일자'] == work_date.strftime('%Y-%m-%d')) &
-                        (final_df['출근시간'] == start_time_val.strftime('%H:%M')) &
-                        (final_df['퇴근시간'] == end_time_val.strftime('%H:%M')) &
-                        (final_df['구분'] != work_type)
+                        (final_df['기록ID'] != record_id) # 수정 시 자기 자신은 제외
                     ]
-                    if not existing_records.empty:
-                        is_duplicate = True
-                
-                if is_duplicate:
-                    st.error(f"동일한 시간에 다른 근무 유형({existing_records['구분'].iloc[0]})으로 등록된 기록이 이미 존재합니다.")
-                else:
+                    for _, row in existing_records.iterrows():
+                        try:
+                            existing_start_dt = datetime.combine(work_date, datetime.strptime(row['출근시간'], '%H:%M').time())
+                            existing_end_dt = datetime.combine(work_date, datetime.strptime(row['퇴근시간'], '%H:%M').time())
+                            # 시간 겹침 확인: (StartA < EndB) and (StartB < EndA)
+                            if new_start_dt < existing_end_dt and existing_start_dt < new_end_dt:
+                                is_overlap = True
+                                st.error(f"입력한 시간이 기존 기록({row['구분']}: {row['출근시간']}~{row['퇴근시간']})과 겹칩니다.")
+                                break
+                        except: continue
+
+                if not is_overlap:
                     try:
-                        start_dt = datetime.combine(work_date, start_time_val)
-                        end_dt = datetime.combine(work_date, end_time_val)
-                        duration = (end_dt - start_dt).total_seconds() / 3600
+                        duration = (new_end_dt - new_start_dt).total_seconds() / 3600
                         if duration < 0: duration += 24
                         
-                        record_id = f"{work_date.strftime('%y%m%d')}_{store_name}_{emp_name}"
                         new_record = pd.DataFrame([{"기록ID": record_id, "지점명": store_name, "근무일자": work_date.strftime('%Y-%m-%d'), "직원이름": emp_name, "구분": work_type, "출근시간": start_time_val.strftime('%H:%M'), "퇴근시간": end_time_val.strftime('%H:%M'), "총시간": duration, "비고": notes}])
                         
                         if not attendance_detail_df.empty:
@@ -244,24 +290,21 @@ def render_store_attendance(user_info):
     st.markdown("---")
     st.markdown("##### 📊 **직원별 근무 시간 집계**")
     if not final_df.empty:
-        # [개선] 집계표 UI 고정
         summary = final_df.pivot_table(index='직원이름', columns='구분', values='총시간', aggfunc='sum', fill_value=0)
         
-        # 항상 표시할 기본 열 정의
         required_cols = ['정상근무', '연장근무']
-        
-        # 피벗 테이블에 없는 기본 열 추가
         for col in required_cols:
             if col not in summary.columns:
                 summary[col] = 0
         
-        # 총합 계산
         summary['총합'] = summary[required_cols].sum(axis=1)
         
-        # 최종 표시할 열 선택 및 순서 지정
         display_summary = summary[required_cols + ['총합']]
         
+        # [개선] 컬럼 너비 동일하게 하기 위해 div로 감싸기
+        st.markdown('<div id="summary-table">', unsafe_allow_html=True)
         st.dataframe(display_summary.style.format("{:.1f} 시간"), use_container_width=True)
+        st.markdown('</div>', unsafe_allow_html=True)
         
     else:
         st.info("집계할 근무기록이 없습니다.")
@@ -502,5 +545,6 @@ else:
         with store_tabs[0]: render_store_attendance(user_info)
         with store_tabs[1]: render_store_settlement(user_info)
         with store_tabs[2]: render_store_employee_info(user_info)
+
 
 
