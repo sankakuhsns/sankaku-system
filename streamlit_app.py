@@ -66,6 +66,13 @@ def append_rows(sheet_name, rows_df):
 def check_health_cert_expiration(user_info):
     store_name = user_info['지점명']
     all_employees_df = load_data("직원마스터")
+    
+    # [오류 방지] 데이터 공백 제거
+    if '소속지점' in all_employees_df.columns:
+        all_employees_df['소속지점'] = all_employees_df['소속지점'].astype(str).str.strip()
+    if '재직상태' in all_employees_df.columns:
+        all_employees_df['재직상태'] = all_employees_df['재직상태'].astype(str).str.strip()
+        
     store_employees_df = all_employees_df[(all_employees_df['소속지점'] == store_name) & (all_employees_df['재직상태'] == '재직중')]
     if store_employees_df.empty: return
 
@@ -93,7 +100,10 @@ def login_screen():
         password = st.text_input("비밀번호", type="password")
         submitted = st.form_submit_button("로그인", use_container_width=True)
         if submitted:
-            user_info_df = users_df[(users_df['지점ID'] == username) & (users_df['지점PW'] == password)]
+            # [오류 방지] 로그인 시 ID 공백 제거
+            users_df['지점ID'] = users_df['지점ID'].astype(str).str.strip()
+            user_info_df = users_df[(users_df['지점ID'] == username.strip()) & (users_df['지점PW'] == password)]
+            
             if not user_info_df.empty:
                 st.session_state['logged_in'] = True
                 st.session_state['user_info'] = user_info_df.iloc[0].to_dict()
@@ -116,10 +126,16 @@ def render_store_attendance(user_info):
     </style>""", unsafe_allow_html=True)
 
     employees_df = load_data("직원마스터")
-    store_employees_df = employees_df[(employees_df['소속지점'] == store_name) & (employees_df['재직상태'] == '재직중')]
     attendance_detail_df = load_data("근무기록_상세")
 
-    # [오류 해결] 재직중인 직원이 없으면 기능 중단
+    # [오류 해결] 데이터 비교 전 공백 제거 로직 추가
+    if '소속지점' in employees_df.columns:
+        employees_df['소속지점'] = employees_df['소속지점'].astype(str).str.strip()
+    if '재직상태' in employees_df.columns:
+        employees_df['재직상태'] = employees_df['재직상태'].astype(str).str.strip()
+
+    store_employees_df = employees_df[(employees_df['소속지점'] == store_name) & (employees_df['재직상태'] == '재직중')]
+    
     if store_employees_df.empty:
         st.warning("먼저 '직원 정보' 탭에서 '재직중' 상태의 직원을 한 명 이상 등록해주세요.")
         return
@@ -142,18 +158,21 @@ def render_store_attendance(user_info):
                 })
     default_df = pd.DataFrame(default_records)
 
-    # [개선] 데이터 병합 로직 간소화
     if not attendance_detail_df.empty and '근무일자' in attendance_detail_df.columns:
         attendance_detail_df['근무일자'] = pd.to_datetime(attendance_detail_df['근무일자'], errors='coerce').dt.strftime('%Y-%m-%d')
         month_details = attendance_detail_df[
             (pd.to_datetime(attendance_detail_df['근무일자']).dt.strftime('%Y-%m') == selected_month.strftime('%Y-%m')) &
             (attendance_detail_df['지점명'] == store_name)
         ]
-        # 상세 기록이 있는 날짜/직원의 기본 기록은 제외하고 합치기
-        merged = pd.concat([default_df, month_details])
-        final_df = merged.drop_duplicates(subset=['근무일자', '직원이름'], keep='last' if not month_details.empty else 'first')
-        final_df = final_df.sort_values(by=['근무일자', '직원이름']).reset_index(drop=True)
+        
+        unique_days_employees = month_details[['근무일자', '직원이름']].drop_duplicates()
+        if not unique_days_employees.empty:
+            merged_df = pd.merge(default_df, unique_days_employees, on=['근무일자', '직원이름'], how='left', indicator=True)
+            default_df_filtered = merged_df[merged_df['_merge'] == 'left_only'].drop(columns=['_merge'])
+        else:
+            default_df_filtered = default_df
 
+        final_df = pd.concat([default_df_filtered, month_details]).sort_values(by=['근무일자', '직원이름']).reset_index(drop=True)
     else:
         final_df = default_df
 
@@ -192,7 +211,6 @@ def render_store_attendance(user_info):
     )
 
     if st.button(f"💾 {selected_date.strftime('%m월 %d일')} 기록 저장", type="primary", use_container_width=True):
-        # [개선] 시간 형식 유효성 검사
         time_pattern = re.compile(r'^([01]\d|2[0-3]):([0-5]\d)$')
         invalid_rows = []
         for i, row in edited_df.iterrows():
@@ -208,7 +226,7 @@ def render_store_attendance(user_info):
             
             for i, row in new_details_to_add.iterrows():
                 if pd.isna(row['기록ID']) or 'default_' in str(row['기록ID']):
-                    new_details_to_add.at[i, '기록ID'] = f"manual_{row['근무일자'].replace('-', '')}_{row['직원이름']}_{int(datetime.now().timestamp()) + i}"
+                    new_details_to_add.at[i, '기록ID'] = f"manual_{selected_date.strftime('%y%m%d')}_{row['직원이름']}_{int(datetime.now().timestamp()) + i}"
             
             final_sheet_df = pd.concat([other_days_details, new_details_to_add], ignore_index=True)
 
@@ -267,7 +285,7 @@ def render_store_settlement(user_info):
         inventory_value = st.number_input("해당 월의 최종 재고 평가액(원)을 입력하세요.", min_value=0, step=10000)
         if st.button("💾 재고액 저장", type="primary", key="inv_save"):
             inventory_log_df = load_data("월말재고_로그")
-            if '평가년월' in inventory_log_df.columns: inventory_log_df['평가년월'] = pd.to_datetime(inventory_log_df['평가년월']).dt.strftime('%Y-%m')
+            if '평가년월' in inventory_log_df.columns: inventory_log_df['평가년월'] = pd.to_datetime(inventory_log_df['평가년월'], errors='coerce').dt.strftime('%Y-%m')
             
             existing_indices = inventory_log_df[(inventory_log_df['평가년월'] == selected_month_inv) & (inventory_log_df['지점명'] == store_name)].index
             if not existing_indices.empty:
@@ -286,14 +304,14 @@ def render_store_settlement(user_info):
         st.warning("정산표 생성을 위한 매출 또는 지출 데이터가 부족합니다."); return
 
     selected_dt = datetime.strptime(selected_month_pl, '%Y-%m'); prev_month_str = (selected_dt - relativedelta(months=1)).strftime('%Y-%m')
-    total_sales = sales_log[(pd.to_datetime(sales_log['매출일자']).dt.strftime('%Y-%m') == selected_month_pl) & (sales_log['지점명'] == store_name)]['금액'].sum()
-    store_settlement = settlement_log[(pd.to_datetime(settlement_log['정산일자']).dt.strftime('%Y-%m') == selected_month_pl) & (settlement_log['지점명'] == store_name)]
+    total_sales = sales_log[(pd.to_datetime(sales_log['매출일자'], errors='coerce').dt.strftime('%Y-%m') == selected_month_pl) & (sales_log['지점명'] == store_name)]['금액'].sum()
+    store_settlement = settlement_log[(pd.to_datetime(settlement_log['정산일자'], errors='coerce').dt.strftime('%Y-%m') == selected_month_pl) & (settlement_log['지점명'] == store_name)]
     food_purchase = store_settlement[store_settlement['대분류'] == '식자재']['금액'].sum()
     sga_expenses_df = store_settlement[store_settlement['대분류'] != '식자재']
     sga_expenses = sga_expenses_df['금액'].sum()
     
-    begin_inv_series = inventory_log[(pd.to_datetime(inventory_log['평가년월']).dt.strftime('%Y-%m') == prev_month_str) & (inventory_log['지점명'] == store_name)]['재고평가액']
-    end_inv_series = inventory_log[(pd.to_datetime(inventory_log['평가년월']).dt.strftime('%Y-%m') == selected_month_pl) & (inventory_log['지점명'] == store_name)]['재고평가액']
+    begin_inv_series = inventory_log[(pd.to_datetime(inventory_log['평가년월'], errors='coerce').dt.strftime('%Y-%m') == prev_month_str) & (inventory_log['지점명'] == store_name)]['재고평가액']
+    end_inv_series = inventory_log[(pd.to_datetime(inventory_log['평가년월'], errors='coerce').dt.strftime('%Y-%m') == selected_month_pl) & (inventory_log['지점명'] == store_name)]['재고평가액']
     
     begin_inv = begin_inv_series.iloc[0] if not begin_inv_series.empty else 0
     if begin_inv == 0: st.info(f"💡 {prev_month_str}(전월) 재고 데이터가 없어 기초 재고가 0원으로 계산됩니다.")
@@ -341,11 +359,15 @@ def render_store_employee_info(user_info):
     st.markdown("---")
     st.markdown("##### **우리 지점 직원 목록 (정보 수정/퇴사 처리)**")
     all_employees_df = load_data("직원마스터")
+    
+    # [오류 방지] 데이터 공백 제거
+    if '소속지점' in all_employees_df.columns:
+        all_employees_df['소속지점'] = all_employees_df['소속지점'].astype(str).str.strip()
+    
     store_employees_df = all_employees_df[all_employees_df['소속지점'] == store_name].copy()
 
     if not store_employees_df.empty:
         st.info("💡 아래 표에서 직접 값을 수정하고 '변경사항 저장' 버튼을 누르세요.")
-        # [개선] num_rows="dynamic" 제거하여 에디터에서는 수정만 담당
         edited_df = st.data_editor(store_employees_df, key="employee_editor", use_container_width=True, disabled=["직원ID", "소속지점"])
         if st.button("💾 변경사항 저장", type="primary", use_container_width=True):
             if update_sheet("직원마스터", edited_df):
@@ -404,3 +426,4 @@ else:
         with store_tabs[0]: render_store_attendance(user_info)
         with store_tabs[1]: render_store_settlement(user_info)
         with store_tabs[2]: render_store_employee_info(user_info)
+
