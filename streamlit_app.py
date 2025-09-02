@@ -195,7 +195,6 @@ def render_store_attendance(user_info):
         
         timesheet.index.name = '이름'
 
-        # [오류 수정] 스타일 적용 함수 변경
         def get_day_style(col_name):
             try:
                 day = int(col_name.replace('일', ''))
@@ -204,13 +203,14 @@ def render_store_attendance(user_info):
                 if current_date.weekday() == 6: return 'background-color: #ffefef'
                 if current_date.weekday() == 5: return 'background-color: #f0f5ff'
             except (ValueError, TypeError): pass
-            return None
+            return ''
 
         styler = timesheet.style
-        for col in timesheet.columns:
-            style = get_day_style(col)
-            if style:
-                styler.map_apply(lambda val: style, subset=[col])
+        # [오류 수정] styler.map_apply -> styler.apply로 변경 및 람다 함수 수정
+        for col_name in timesheet.columns:
+            style_str = get_day_style(col_name)
+            if style_str:
+                styler.apply(lambda x, style=style_str: [style] * len(x), subset=[col_name])
         
         def format_hours(val):
             if pd.isna(val): return ""
@@ -252,8 +252,6 @@ def render_store_attendance(user_info):
                 
                 record_id = f"{work_date.strftime('%y%m%d')}_{store_name}_{emp_name}"
                 
-                # [개선] 중복 방지 로직 강화
-                # final_df에는 화면에 보이는 모든 기록이 포함되어 있음 (자동생성+상세기록)
                 existing_records = final_df[
                     (final_df['직원이름'] == emp_name) &
                     (final_df['근무일자'] == work_date.strftime('%Y-%m-%d')) &
@@ -276,9 +274,7 @@ def render_store_attendance(user_info):
                         duration = (new_end_dt - new_start_dt).total_seconds() / 3600
                         new_record = pd.DataFrame([{"기록ID": record_id, "지점명": store_name, "근무일자": work_date.strftime('%Y-%m-%d'), "직원이름": emp_name, "구분": work_type, "출근시간": start_time_val.strftime('%H:%M'), "퇴근시간": end_time_val.strftime('%H:%M'), "총시간": duration, "비고": notes}])
                         
-                        # [개선] 통상근무 수정 로직 명확화
-                        # 구글 시트 원본(attendance_detail_df)에서 해당 ID를 제거하고 새 기록을 추가
-                        current_detail_df = load_data("근무기록_상세") # 최신 데이터 다시 로드
+                        current_detail_df = load_data("근무기록_상세")
                         if not current_detail_df.empty:
                             current_detail_df = current_detail_df[current_detail_df['기록ID'] != record_id]
                         
@@ -289,7 +285,6 @@ def render_store_attendance(user_info):
                     except Exception as e: st.error(f"저장 중 오류 발생: {e}. 입력값을 확인해주세요.")
 
             if deleted:
-                # [개선] 삭제 로직 -> 결근 처리로 변경
                 record_id_to_delete = f"{work_date.strftime('%y%m%d')}_{store_name}_{emp_name}"
                 deleted_record = pd.DataFrame([{"기록ID": record_id_to_delete, "지점명": store_name, "근무일자": work_date.strftime('%Y-%m-%d'), "직원이름": emp_name, "구분": "결근", "출근시간": "00:00", "퇴근시간": "00:00", "총시간": 0, "비고": "사용자 삭제 처리"}])
 
@@ -559,6 +554,7 @@ else:
         with store_tabs[0]: render_store_attendance(user_info)
         with store_tabs[1]: render_store_settlement(user_info)
         with store_tabs[2]: render_store_employee_info(user_info)
+
 
 
 
