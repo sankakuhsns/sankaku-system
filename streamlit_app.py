@@ -113,8 +113,11 @@ def login_screen():
 
 def render_store_attendance(user_info):
     st.subheader("⏰ 월별 근무기록")
+    
+    # --- 디버그 모드 스위치 ---
+    debug_mode = st.toggle("🐞 디버그 모드")
+    
     store_name = user_info['지점명']
-
     employees_df = load_data("직원마스터")
     store_employees = employees_df[employees_df['소속지점'] == store_name]['이름'].tolist()
 
@@ -127,9 +130,7 @@ def render_store_attendance(user_info):
     selected_month_str_display = st.selectbox("근무 기록 년/월 선택", options=options)
     selected_month_str = datetime.strptime(selected_month_str_display, '%Y년 / %m월').strftime('%Y-%m')
 
-    st.markdown("---")
     st.markdown("##### 근무 기록 입력")
-
     col_config = {
         "일": st.column_config.TextColumn("일 (DD)", max_chars=2, required=True),
         "직원 이름": st.column_config.SelectboxColumn("직원 이름", options=store_employees, required=True),
@@ -140,53 +141,57 @@ def render_store_attendance(user_info):
     if 'attendance_df' not in st.session_state:
         st.session_state.attendance_df = pd.DataFrame(columns=col_config.keys())
 
-    edited_df = st.data_editor(
-        st.session_state.attendance_df, num_rows="dynamic", use_container_width=True,
-        column_config=col_config, key="attendance_editor"
-    )
+    edited_df = st.data_editor(st.session_state.attendance_df, num_rows="dynamic", use_container_width=True, column_config=col_config, key="attendance_editor")
     
     if st.button("💾 근무기록 저장하기", use_container_width=True, type="primary"):
+        if debug_mode:
+            st.warning("🐞 디버그 정보: 저장 버튼 클릭 시 data_editor의 원본 데이터")
+            st.dataframe(edited_df)
+            for i, row in edited_df.iterrows():
+                 st.write(f"행 {i+1}의 '일' 컬럼 원본값: `{row['일']}`, 타입: `{type(row['일'])}`")
+                 st.write(f"행 {i+1}의 '출근 시간' 컬럼 원본값: `{row['출근 시간']}`, 타입: `{type(row['출근 시간'])}`")
+
         df_to_save = edited_df.dropna(how='all')
         if not df_to_save.empty:
             preview_entries = []
             is_valid = True
             for index, row in df_to_save.iterrows():
+                row_num = index + 1
                 try:
                     day_str = f"{int(row['일']):02d}"
                     full_date_str = f"{selected_month_str}-{day_str}"
                     datetime.strptime(full_date_str, '%Y-%m-%d')
-
-                    in_time_str = f"{row['출근 시간'][:2]}:{row['출근 시간'][2:]}"
-                    out_time_str = f"{row['퇴근 시간'][:2]}:{row['퇴근 시간'][2:]}"
+                except Exception:
+                    st.error(f"{row_num}번째 행 '{row['직원 이름']}'의 날짜(DD) 입력값이 유효하지 않습니다 (예: 9월에 31일 입력).")
+                    is_valid = False; break
+                
+                try:
+                    in_time_str = f"{str(row['출근 시간'])[:2]}:{str(row['출근 시간'])[2:]}"
+                    out_time_str = f"{str(row['퇴근 시간'])[:2]}:{str(row['퇴근 시간'])[2:]}"
                     datetime.strptime(in_time_str, '%H:%M')
                     datetime.strptime(out_time_str, '%H:%M')
-                    
-                    preview_entries.append({'근무일자': full_date_str, '직원 이름': row['직원 이름'],
-                                            '출근': in_time_str, '퇴근': out_time_str})
-                except (ValueError, TypeError, KeyError):
-                    st.error(f"{index+1}번째 행의 '{row.get('직원 이름', '알수없음')}' 직원 정보의 날짜(DD) 또는 시간(HHMM) 형식이 올바르지 않습니다.")
-                    is_valid = False
-                    break
+                except Exception:
+                    st.error(f"{row_num}번째 행 '{row['직원 이름']}'의 시간(HHMM) 입력값이 유효하지 않습니다 (4자리 숫자, 예: 0900).")
+                    is_valid = False; break
+                
+                preview_entries.append({'근무일자': full_date_str, '직원 이름': row['직원 이름'], '출근': in_time_str, '퇴근': out_time_str})
             
             if is_valid:
-                st.session_state['preview_attendance'] = pd.DataFrame(preview_entries)
+                preview_df = pd.DataFrame(preview_entries)
+                st.session_state['preview_attendance'] = preview_df
+                st.markdown("---"); st.markdown("##### 📥 저장될 내용 미리보기")
+                st.dataframe(preview_df, use_container_width=True, hide_index=True)
         else:
             st.warning("입력된 근무기록이 없습니다.")
 
     if 'preview_attendance' in st.session_state and not st.session_state['preview_attendance'].empty:
-        st.markdown("---")
-        st.markdown("##### 📥 저장될 내용 미리보기")
-        st.dataframe(st.session_state['preview_attendance'], use_container_width=True, hide_index=True)
-        
         if st.button("✅ 최종 확정 및 저장", use_container_width=True, type="primary"):
             preview_df = st.session_state['preview_attendance']
             log_entries = []
             for _, row in preview_df.iterrows():
-                clock_in = f"{row['근무일자']} {row['출근']}:00"
-                clock_out = f"{row['근무일자']} {row['퇴근']}:00"
+                clock_in = f"{row['근무일자']} {row['출근']}:00"; clock_out = f"{row['근무일자']} {row['퇴근']}:00"
                 log_entries.append([datetime.now(), store_name, row['직원 이름'], '출근', clock_in])
                 log_entries.append([datetime.now(), store_name, row['직원 이름'], '퇴근', clock_out])
-
             log_df = pd.DataFrame(log_entries, columns=['기록일시', '지점명', '직원이름', '출/퇴근', '근무시각'])
             if append_rows("출근부_로그", log_df):
                 st.success("근무기록이 성공적으로 저장되었습니다.")
@@ -429,3 +434,4 @@ else:
         with store_tabs[0]: render_store_attendance(user_info)
         with store_tabs[1]: render_store_settlement(user_info)
         with store_tabs[2]: render_store_employee_info(user_info)
+
