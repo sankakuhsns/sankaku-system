@@ -27,8 +27,15 @@ def load_data(sheet_name):
         spreadsheet = get_gspread_client().open_by_key(st.secrets["gcp_service_account"]["SPREADSHEET_KEY"])
         worksheet = spreadsheet.worksheet(sheet_name)
         df = pd.DataFrame(worksheet.get_all_records())
+
+        # [오류 해결] 모든 텍스트(object) 컬럼의 좌우 공백을 자동으로 제거
+        for col in df.select_dtypes(include=['object']).columns:
+            df[col] = df[col].astype(str).str.strip()
+
+        # 숫자 컬럼 변환
         for col in df.columns:
             if any(keyword in col for keyword in ['금액', '평가액', '총시간']):
+                # 쉼표 제거 후 숫자 변환
                 df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
         return df
     except Exception as e:
@@ -66,12 +73,6 @@ def append_rows(sheet_name, rows_df):
 def check_health_cert_expiration(user_info):
     store_name = user_info['지점명']
     all_employees_df = load_data("직원마스터")
-    
-    # [오류 방지] 데이터 공백 제거
-    if '소속지점' in all_employees_df.columns:
-        all_employees_df['소속지점'] = all_employees_df['소속지점'].astype(str).str.strip()
-    if '재직상태' in all_employees_df.columns:
-        all_employees_df['재직상태'] = all_employees_df['재직상태'].astype(str).str.strip()
         
     store_employees_df = all_employees_df[(all_employees_df['소속지점'] == store_name) & (all_employees_df['재직상태'] == '재직중')]
     if store_employees_df.empty: return
@@ -100,8 +101,6 @@ def login_screen():
         password = st.text_input("비밀번호", type="password")
         submitted = st.form_submit_button("로그인", use_container_width=True)
         if submitted:
-            # [오류 방지] 로그인 시 ID 공백 제거
-            users_df['지점ID'] = users_df['지점ID'].astype(str).str.strip()
             user_info_df = users_df[(users_df['지점ID'] == username.strip()) & (users_df['지점PW'] == password)]
             
             if not user_info_df.empty:
@@ -128,12 +127,6 @@ def render_store_attendance(user_info):
     employees_df = load_data("직원마스터")
     attendance_detail_df = load_data("근무기록_상세")
 
-    # [오류 해결] 데이터 비교 전 공백 제거 로직 추가
-    if '소속지점' in employees_df.columns:
-        employees_df['소속지점'] = employees_df['소속지점'].astype(str).str.strip()
-    if '재직상태' in employees_df.columns:
-        employees_df['재직상태'] = employees_df['재직상태'].astype(str).str.strip()
-
     store_employees_df = employees_df[(employees_df['소속지점'] == store_name) & (employees_df['재직상태'] == '재직중')]
     
     if store_employees_df.empty:
@@ -150,7 +143,7 @@ def render_store_attendance(user_info):
     day_map = {'월': 0, '화': 1, '수': 2, '목': 3, '금': 4, '토': 5, '일': 6}
     for dt in pd.date_range(start_date, end_date):
         for _, emp in store_employees_df.iterrows():
-            if dt.weekday() in [day_map.get(d.strip()) for d in emp.get('근무요일', '').split(',')]:
+            if dt.weekday() in [day_map.get(d) for d in emp.get('근무요일', '').split(',')]:
                 default_records.append({
                     "기록ID": f"default_{dt.strftime('%y%m%d')}_{emp['이름']}", "근무일자": dt.strftime('%Y-%m-%d'),
                     "직원이름": emp['이름'], "구분": "정상근무", "출근시간": emp.get('기본출근', '09:00'),
@@ -159,27 +152,23 @@ def render_store_attendance(user_info):
     default_df = pd.DataFrame(default_records)
 
     if not attendance_detail_df.empty and '근무일자' in attendance_detail_df.columns:
-        attendance_detail_df['근무일자'] = pd.to_datetime(attendance_detail_df['근무일자'], errors='coerce').dt.strftime('%Y-%m-%d')
         month_details = attendance_detail_df[
-            (pd.to_datetime(attendance_detail_df['근무일자']).dt.strftime('%Y-%m') == selected_month.strftime('%Y-%m')) &
+            (pd.to_datetime(attendance_detail_df['근무일자'], errors='coerce').dt.strftime('%Y-%m') == selected_month.strftime('%Y-%m')) &
             (attendance_detail_df['지점명'] == store_name)
         ]
         
-        unique_days_employees = month_details[['근무일자', '직원이름']].drop_duplicates()
-        if not unique_days_employees.empty:
-            merged_df = pd.merge(default_df, unique_days_employees, on=['근무일자', '직원이름'], how='left', indicator=True)
-            default_df_filtered = merged_df[merged_df['_merge'] == 'left_only'].drop(columns=['_merge'])
-        else:
-            default_df_filtered = default_df
-
-        final_df = pd.concat([default_df_filtered, month_details]).sort_values(by=['근무일자', '직원이름']).reset_index(drop=True)
+        if not month_details.empty:
+            detail_keys = month_details.set_index(['근무일자', '직원이름']).index
+            default_df = default_df[~default_df.set_index(['근무일자', '직원이름']).index.isin(detail_keys)]
+        
+        final_df = pd.concat([default_df, month_details]).sort_values(by=['근무일자', '직원이름']).reset_index(drop=True)
     else:
         final_df = default_df
 
     def calculate_duration(row):
         try:
-            start_t = datetime.strptime(row['출근시간'], '%H:%M')
-            end_t = datetime.strptime(row['퇴근시간'], '%H:%M')
+            start_t = datetime.strptime(str(row['출근시간']), '%H:%M')
+            end_t = datetime.strptime(str(row['퇴근시간']), '%H:%M')
             duration = (end_t - start_t).total_seconds() / 3600
             return duration + 24 if duration < 0 else duration
         except (TypeError, ValueError): return 0
@@ -202,7 +191,7 @@ def render_store_attendance(user_info):
     edited_df = st.data_editor(
         daily_records_df, key=f"editor_{selected_date}", num_rows="dynamic", use_container_width=True,
         column_config={
-            "직원이름": st.column_config.SelectboxColumn("이름", options=store_employees_df['이름'].unique(), required=True),
+            "직원이름": st.column_config.SelectboxColumn("이름", options=list(store_employees_df['이름'].unique()), required=True),
             "구분": st.column_config.SelectboxColumn("구분", options=["정상근무", "연장근무", "유급휴가", "무급휴가", "결근"], required=True),
             "출근시간": st.column_config.TextColumn("출근(HH:MM)", required=True),
             "퇴근시간": st.column_config.TextColumn("퇴근(HH:MM)", required=True),
@@ -225,7 +214,7 @@ def render_store_attendance(user_info):
             new_details_to_add['지점명'] = store_name
             
             for i, row in new_details_to_add.iterrows():
-                if pd.isna(row['기록ID']) or 'default_' in str(row['기록ID']):
+                if pd.isna(row.get('기록ID')) or 'default_' in str(row.get('기록ID')):
                     new_details_to_add.at[i, '기록ID'] = f"manual_{selected_date.strftime('%y%m%d')}_{row['직원이름']}_{int(datetime.now().timestamp()) + i}"
             
             final_sheet_df = pd.concat([other_days_details, new_details_to_add], ignore_index=True)
@@ -359,10 +348,6 @@ def render_store_employee_info(user_info):
     st.markdown("---")
     st.markdown("##### **우리 지점 직원 목록 (정보 수정/퇴사 처리)**")
     all_employees_df = load_data("직원마스터")
-    
-    # [오류 방지] 데이터 공백 제거
-    if '소속지점' in all_employees_df.columns:
-        all_employees_df['소속지점'] = all_employees_df['소속지점'].astype(str).str.strip()
     
     store_employees_df = all_employees_df[all_employees_df['소속지점'] == store_name].copy()
 
