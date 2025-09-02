@@ -179,6 +179,17 @@ def render_store_attendance(user_info):
                 new_df = pd.DataFrame(new_records)
                 final_sheet_df = pd.concat([attendance_detail_df, new_df], ignore_index=True)
                 if update_sheet("근무기록_상세", final_sheet_df):
+                    # ✅ 로그 기록
+                    log_data = pd.DataFrame([{
+                        "변경일시": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                        "작업자ID": user_info.get('지점ID', ''),
+                        "지점명": store_name,
+                        "작업유형": "스케줄 생성",
+                        "대상일자": selected_month.strftime('%Y-%m'),
+                        "변경건수": len(new_df)
+                    }])
+                    append_rows("근무기록_로그", log_data)
+
                     st.success("기본 스케줄이 생성되었습니다."); st.rerun()
         return
 
@@ -239,7 +250,7 @@ def render_store_attendance(user_info):
         error_found = False
         
         if edited_df.isnull().values.any():
-            st.error("필수 항목(이름, 구분, 출/퇴근 시간)이 비어있습니다. 모든 항목을 채워주세요.")
+            st.error("필수 항목(이름, 구분, 출/퇴근 시간)이 비어있습니다.")
             error_found = True
 
         time_pattern = re.compile(r'^([01]\d|2[0-3]):([0-5]\d)$')
@@ -278,6 +289,17 @@ def render_store_attendance(user_info):
             
             final_sheet_df = pd.concat([other_records, new_details], ignore_index=True)
             if update_sheet("근무기록_상세", final_sheet_df):
+                # ✅ 로그 저장
+                log_data = pd.DataFrame([{
+                    "변경일시": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    "작업자ID": user_info.get('지점ID', ''),
+                    "지점명": store_name,
+                    "작업유형": "근무기록 수정",
+                    "대상일자": selected_date.strftime('%Y-%m-%d'),
+                    "변경건수": len(new_details)
+                }])
+                append_rows("근무기록_로그", log_data)
+
                 st.success("변경사항이 성공적으로 저장되었습니다."); st.rerun()
 
     st.markdown("---")
@@ -475,4 +497,5 @@ else:
         with store_tabs[0]: render_store_attendance(user_info)
         with store_tabs[1]: render_store_settlement(user_info)
         with store_tabs[2]: render_store_employee_info(user_info)
+
 
