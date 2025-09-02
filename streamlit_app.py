@@ -1,18 +1,21 @@
-# app.py
+# streamlit_app.py
 
 import streamlit as st
 import gspread
 import pandas as pd
 from google.oauth2.service_account import Credentials
+from datetime import datetime, date, timedelta
+import io
 
 # =============================================================================
-# 1. 기본 설정
+# 0. 기본 설정 및 구글 시트 연결
 # =============================================================================
 
-# Streamlit 페이지 설정
-st.set_page_config(page_title="산카쿠 통합 관리 시스템", page_icon="📈", layout="wide")
+# --- Streamlit 페이지 설정 ---
+st.set_page_config(page_title="산카쿠 통합 관리 시스템", page_icon="🏢", layout="wide")
 
-# Google Sheets API와 연결 설정 (이 부분은 한번만 설정하면 됩니다)
+# --- 구글 시트 연결 ---
+# @st.cache_resource: 한 번 실행된 리소스는 캐시에 저장하여 재실행 방지
 @st.cache_resource
 def get_gspread_client():
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -21,40 +24,64 @@ def get_gspread_client():
     )
     return gspread.authorize(creds)
 
-# 스프레드시트 열기
-@st.cache_resource
-def open_spreadsheet(sheet_name):
-    # 여기에 본인의 구글 시트 파일 이름을 넣으세요.
-    SPREADSHEET_NAME = "산카쿠 통합 정산 시스템" 
+# @st.cache_data: 함수의 입력값이 바뀌지 않으면 함수를 재실행하지 않고 캐시된 결과 반환
+@st.cache_data(ttl=600) # 10분마다 데이터 새로고침
+def load_data(sheet_name):
+    SPREADSHEET_NAME = "산카쿠 통합 정산 시스템" # 본인의 구글 시트 파일 이름
     try:
         spreadsheet = get_gspread_client().open(SPREADSHEET_NAME)
-        return spreadsheet.worksheet(sheet_name)
-    except gspread.exceptions.SpreadsheetNotFound:
-        st.error("스프레드시트를 찾을 수 없습니다. 파일 이름을 확인하세요.")
-        st.stop()
-    except gspread.exceptions.WorksheetNotFound:
-        st.error(f"'{sheet_name}' 시트를 찾을 수 없습니다. 시트 이름을 확인하세요.")
-        st.stop()
+        worksheet = spreadsheet.worksheet(sheet_name)
+        return pd.DataFrame(worksheet.get_all_records())
+    except Exception as e:
+        st.error(f"'{sheet_name}' 시트를 불러오는 중 오류 발생: {e}")
+        return pd.DataFrame()
+
+def update_sheet(sheet_name, df):
+    """데이터프레임으로 시트 전체를 업데이트하는 함수"""
+    try:
+        SPREADSHEET_NAME = "산카쿠 통합 정산 시스템"
+        spreadsheet = get_gspread_client().open(SPREADSHEET_NAME)
+        worksheet = spreadsheet.worksheet(sheet_name)
+        worksheet.update([df.columns.values.tolist()] + df.values.tolist())
+        st.cache_data.clear() # 데이터 변경 후 캐시 초기화
+        return True
+    except Exception as e:
+        st.error(f"'{sheet_name}' 시트 업데이트 중 오류 발생: {e}")
+        return False
+
+def append_rows(sheet_name, rows_df):
+    """데이터프레임의 행들을 시트에 추가하는 함수"""
+    try:
+        SPREADSHEET_NAME = "산카쿠 통합 정산 시스템"
+        spreadsheet = get_gspread_client().open(SPREADSHEET_NAME)
+        worksheet = spreadsheet.worksheet(sheet_name)
+        worksheet.append_rows(rows_df.values.tolist())
+        st.cache_data.clear() # 데이터 변경 후 캐시 초기화
+        return True
+    except Exception as e:
+        st.error(f"'{sheet_name}' 시트에 행 추가 중 오류 발생: {e}")
+        return False
 
 # =============================================================================
-# 2. 로그인 기능
+# 1. 로그인 화면 및 로직
 # =============================================================================
 
-def login():
-    st.title("산카쿠 통합 관리 시스템")
+def login_screen():
+    st.title("🏢 산카쿠 통합 관리 시스템")
     st.markdown("---")
-
-    # 지점마스터 시트에서 사용자 정보 불러오기
-    users_sheet = open_spreadsheet("지점마스터")
-    users_df = pd.DataFrame(users_sheet.get_all_records())
+    
+    users_df = load_data("지점마스터")
+    if users_df.empty:
+        st.error("'지점마스터' 시트를 확인해주세요.")
+        st.stop()
 
     with st.form("login_form"):
         username = st.text_input("아이디 (지점ID)")
         password = st.text_input("비밀번호", type="password")
-        submitted = st.form_submit_button("로그인")
+        submitted = st.form_submit_button("로그인", use_container_width=True)
 
         if submitted:
-            user_info = users_df[(users_df['지점ID'] == username) & (users_df['지점PW'] == password)] # 실제로는 비밀번호 해싱 필요
+            user_info = users_df[(users_df['지점ID'] == username) & (users_df['지점PW'] == password)]
             if not user_info.empty:
                 st.session_state['logged_in'] = True
                 st.session_state['user_info'] = user_info.iloc[0].to_dict()
@@ -63,51 +90,110 @@ def login():
                 st.error("아이디 또는 비밀번호가 올바르지 않습니다.")
 
 # =============================================================================
-# 3. 메인 애플리케이션 실행 로직
+# 2. 지점 (Store) 페이지 기능
 # =============================================================================
 
-# 로그인 상태가 아니면 로그인 화면 표시
+def render_store_attendance(user_info):
+    """월별 근무기록 입력 및 조회"""
+    st.subheader("⏰ 월별 근무기록")
+    
+    # ... 기능 구현 ...
+    st.info("지점별 월별 근무기록 입력 기능이 여기에 구현될 예정입니다.")
+
+
+def render_store_settlement(user_info):
+    """월말 재고 입력 및 정산표 확인"""
+    st.subheader("💰 정산 및 재고")
+    
+    # ... 기능 구현 ...
+    st.info("월말 재고 입력 및 정산표 확인 기능이 여기에 구현될 예정입니다.")
+
+def render_store_employee_info(user_info):
+    """직원 정보 및 보건증 관리"""
+    st.subheader("👥 직원 정보")
+    
+    # ... 기능 구현 ...
+    st.info("직원 정보 및 보건증 만료일 확인 기능이 여기에 구현될 예정입니다.")
+
+# =============================================================================
+# 3. 관리자 (Admin) 페이지 기능
+# =============================================================================
+
+def render_admin_dashboard():
+    """통합 대시보드"""
+    st.subheader("📊 통합 대시보드")
+    
+    # ... 기능 구현 ...
+    st.info("전체 지점 데이터 종합 대시보드 기능이 여기에 구현될 예정입니다.")
+
+def render_admin_settlement_input():
+    """월별 정산 내역 입력"""
+    st.subheader("✍️ 월별 정산 입력")
+
+    # ... 기능 구현 ...
+    st.info("월별/지점별 지출 내역 입력 기능이 여기에 구현될 예정입니다.")
+
+
+def render_admin_employee_management():
+    """전 직원 관리"""
+    st.subheader("🗂️ 전 직원 관리")
+
+    # ... 기능 구현 ...
+    st.info("전체 직원 정보, 출근부, 보건증 현황 관리 기능이 여기에 구현될 예정입니다.")
+
+
+def render_admin_settings():
+    """OKPOS 업로드 및 시스템 설정"""
+    st.subheader("⚙️ 데이터 및 설정")
+
+    # ... 기능 구현 ...
+    st.info("OKPOS 파일 업로드, 지점 계정 관리 기능이 여기에 구현될 예정입니다.")
+
+# =============================================================================
+# 4. 메인 실행 로직
+# =============================================================================
+
+# 세션 상태 초기화
 if 'logged_in' not in st.session_state:
     st.session_state['logged_in'] = False
 
+# 로그인 페이지 또는 메인 페이지 표시
 if not st.session_state['logged_in']:
-    login()
+    login_screen()
 else:
-    # 로그인 성공 시, 사용자 정보 가져오기
+    # --- 사이드바 ---
     user_info = st.session_state['user_info']
-    role = user_info['역할']
-    name = user_info['지점명']
-
-    st.sidebar.success(f"{name} ({role})님, 환영합니다.")
+    role = user_info.get('역할', 'store')
+    name = user_info.get('지점명', '사용자')
+    
+    st.sidebar.success(f"**{name}** ({role})님")
+    st.sidebar.markdown("---")
     if st.sidebar.button("로그아웃"):
         for key in list(st.session_state.keys()):
             del st.session_state[key]
         st.rerun()
 
-    st.title("📈 산카쿠 통합 관리 시스템")
-    st.markdown("---")
-
-    # 역할에 따라 다른 탭 메뉴를 보여줌
+    # --- 메인 콘텐츠 ---
     if role == 'admin':
-        st.header("관리자 페이지")
-        tab1, tab2, tab3, tab4 = st.tabs(["📊 통합 대시보드", "✍️ 월별 정산 입력", "🗂️ 전 직원 관리", "⚙️ 데이터 및 설정"])
+        st.title("관리자 페이지")
+        admin_tabs = st.tabs(["📊 통합 대시보드", "✍️ 월별 정산 입력", "🗂️ 전 직원 관리", "⚙️ 데이터 및 설정"])
+        
+        with admin_tabs[0]:
+            render_admin_dashboard()
+        with admin_tabs[1]:
+            render_admin_settlement_input()
+        with admin_tabs[2]:
+            render_admin_employee_management()
+        with admin_tabs[3]:
+            render_admin_settings()
 
-        with tab1:
-            st.write("여기에 전체 지점 데이터를 종합한 대시보드를 만듭니다.")
-        with tab2:
-            st.write("여기에 월별/지점별 지출 내역을 입력하는 기능을 만듭니다.")
-        with tab3:
-            st.write("여기에 전체 직원 정보, 출근부, 보건증 현황을 관리하는 기능을 만듭니다.")
-        with tab4:
-            st.write("여기에 OKPOS 파일 업로드, 지점 계정 관리 기능을 만듭니다.")
-
-    elif role == 'store':
-        st.header(f"{name} 지점 페이지")
-        tab1, tab2, tab3 = st.tabs(["⏰ 월별 근무기록", "💰 정산 및 재고", "👥 직원 정보"])
-
-        with tab1:
-            st.write("여기에 월별 출근부를 한번에 입력하고 엑셀로 다운로드하는 기능을 만듭니다.")
-        with tab2:
-            st.write("여기에 월말 재고 자산 평가액을 입력하고, 최종 정산표를 확인하는 기능을 만듭니다.")
-        with tab3:
-            st.write("여기에 우리 지점 직원 정보와 보건증 만료일을 확인하는 기능을 만듭니다.")
+    else: # 'store' 역할
+        st.title(f"{name} 지점 페이지")
+        store_tabs = st.tabs(["⏰ 월별 근무기록", "💰 정산 및 재고", "👥 직원 정보"])
+        
+        with store_tabs[0]:
+            render_store_attendance(user_info)
+        with store_tabs[1]:
+            render_store_settlement(user_info)
+        with store_tabs[2]:
+            render_store_employee_info(user_info)
