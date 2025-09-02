@@ -111,13 +111,12 @@ def login_screen():
 # 2. 지점 (Store) 페이지 기능
 # =============================================================================
 
+# streamlit_app.py 파일에서 이 함수를 찾아 아래 코드로 교체하세요.
+
 def render_store_attendance(user_info):
     st.subheader("⏰ 월별 근무기록")
-    
-    # --- 디버그 모드 스위치 ---
-    debug_mode = st.toggle("🐞 디버그 모드")
-    
     store_name = user_info['지점명']
+
     employees_df = load_data("직원마스터")
     store_employees = employees_df[employees_df['소속지점'] == store_name]['이름'].tolist()
 
@@ -130,7 +129,9 @@ def render_store_attendance(user_info):
     selected_month_str_display = st.selectbox("근무 기록 년/월 선택", options=options)
     selected_month_str = datetime.strptime(selected_month_str_display, '%Y년 / %m월').strftime('%Y-%m')
 
+    st.markdown("---")
     st.markdown("##### 근무 기록 입력")
+
     col_config = {
         "일": st.column_config.TextColumn("일 (DD)", max_chars=2, required=True),
         "직원 이름": st.column_config.SelectboxColumn("직원 이름", options=store_employees, required=True),
@@ -141,45 +142,50 @@ def render_store_attendance(user_info):
     if 'attendance_df' not in st.session_state:
         st.session_state.attendance_df = pd.DataFrame(columns=col_config.keys())
 
-    edited_df = st.data_editor(st.session_state.attendance_df, num_rows="dynamic", use_container_width=True, column_config=col_config, key="attendance_editor")
+    edited_df = st.data_editor(
+        st.session_state.attendance_df, num_rows="dynamic", use_container_width=True,
+        column_config=col_config, key="attendance_editor"
+    )
     
     if st.button("💾 근무기록 저장하기", use_container_width=True, type="primary"):
-        if debug_mode:
-            st.warning("🐞 디버그 정보: 저장 버튼 클릭 시 data_editor의 원본 데이터")
-            st.dataframe(edited_df)
-            for i, row in edited_df.iterrows():
-                 st.write(f"행 {i+1}의 '일' 컬럼 원본값: `{row['일']}`, 타입: `{type(row['일'])}`")
-                 st.write(f"행 {i+1}의 '출근 시간' 컬럼 원본값: `{row['출근 시간']}`, 타입: `{type(row['출근 시간'])}`")
-
-        df_to_save = edited_df.dropna(how='all')
+        df_to_save = edited_df.dropna(how='all').reset_index(drop=True)
         if not df_to_save.empty:
             preview_entries = []
             is_valid = True
+            
+            # --- ↓↓↓ 컬럼 이름을 직접 참조하지 않고, 순서(index)로 참조하도록 수정 ---
+            date_col = df_to_save.columns[0]       # 첫 번째 열을 '일'로 인식
+            name_col = df_to_save.columns[1]       # 두 번째 열을 '이름'으로 인식
+            in_time_col = df_to_save.columns[2]    # 세 번째 열을 '출근시간'으로 인식
+            out_time_col = df_to_save.columns[3]   # 네 번째 열을 '퇴근시간'으로 인식
+            
             for index, row in df_to_save.iterrows():
                 row_num = index + 1
                 try:
-                    day_str = f"{int(row['일']):02d}"
+                    day_str = f"{int(row[date_col]):02d}"
                     full_date_str = f"{selected_month_str}-{day_str}"
                     datetime.strptime(full_date_str, '%Y-%m-%d')
-                except Exception:
-                    st.error(f"{row_num}번째 행 '{row['직원 이름']}'의 날짜(DD) 입력값이 유효하지 않습니다 (예: 9월에 31일 입력).")
-                    is_valid = False; break
-                
-                try:
-                    in_time_str = f"{str(row['출근 시간'])[:2]}:{str(row['출근 시간'])[2:]}"
-                    out_time_str = f"{str(row['퇴근 시간'])[:2]}:{str(row['퇴근 시간'])[2:]}"
+                    
+                    in_time_str = f"{str(row[in_time_col])[:2]}:{str(row[in_time_col])[2:]}"
+                    out_time_str = f"{str(row[out_time_col])[:2]}:{str(row[out_time_col])[2:]}"
                     datetime.strptime(in_time_str, '%H:%M')
                     datetime.strptime(out_time_str, '%H:%M')
+                    
+                    preview_entries.append({
+                        '근무일자': full_date_str, '직원 이름': row[name_col],
+                        '출근': in_time_str, '퇴근': out_time_str,
+                    })
                 except Exception:
-                    st.error(f"{row_num}번째 행 '{row['직원 이름']}'의 시간(HHMM) 입력값이 유효하지 않습니다 (4자리 숫자, 예: 0900).")
-                    is_valid = False; break
-                
-                preview_entries.append({'근무일자': full_date_str, '직원 이름': row['직원 이름'], '출근': in_time_str, '퇴근': out_time_str})
-            
+                    st.error(f"{row_num}번째 행의 날짜(DD) 또는 시간(HHMM) 입력값이 유효하지 않습니다.")
+                    is_valid = False
+                    break
+            # --- ↑↑↑ 로직 개선 완료 ---
+
             if is_valid:
                 preview_df = pd.DataFrame(preview_entries)
                 st.session_state['preview_attendance'] = preview_df
-                st.markdown("---"); st.markdown("##### 📥 저장될 내용 미리보기")
+                st.markdown("---")
+                st.markdown("##### 📥 저장될 내용 미리보기")
                 st.dataframe(preview_df, use_container_width=True, hide_index=True)
         else:
             st.warning("입력된 근무기록이 없습니다.")
@@ -187,11 +193,14 @@ def render_store_attendance(user_info):
     if 'preview_attendance' in st.session_state and not st.session_state['preview_attendance'].empty:
         if st.button("✅ 최종 확정 및 저장", use_container_width=True, type="primary"):
             preview_df = st.session_state['preview_attendance']
+            store_name = user_info['지점명']
             log_entries = []
             for _, row in preview_df.iterrows():
-                clock_in = f"{row['근무일자']} {row['출근']}:00"; clock_out = f"{row['근무일자']} {row['퇴근']}:00"
+                clock_in = f"{row['근무일자']} {row['출근']}:00"
+                clock_out = f"{row['근무일자']} {row['퇴근']}:00"
                 log_entries.append([datetime.now(), store_name, row['직원 이름'], '출근', clock_in])
                 log_entries.append([datetime.now(), store_name, row['직원 이름'], '퇴근', clock_out])
+
             log_df = pd.DataFrame(log_entries, columns=['기록일시', '지점명', '직원이름', '출/퇴근', '근무시각'])
             if append_rows("출근부_로그", log_df):
                 st.success("근무기록이 성공적으로 저장되었습니다.")
@@ -434,4 +443,5 @@ else:
         with store_tabs[0]: render_store_attendance(user_info)
         with store_tabs[1]: render_store_settlement(user_info)
         with store_tabs[2]: render_store_employee_info(user_info)
+
 
