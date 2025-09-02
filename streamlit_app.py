@@ -7,6 +7,7 @@ from google.oauth2.service_account import Credentials
 from datetime import datetime, date, timedelta
 from dateutil.relativedelta import relativedelta
 import io
+import plotly.express as px
 
 # =============================================================================
 # 0. 기본 설정 및 구글 시트 연결
@@ -18,10 +19,7 @@ st.set_page_config(page_title="산카쿠 통합 관리 시스템", page_icon="�
 # --- 구글 시트 연결 ---
 @st.cache_resource
 def get_gspread_client():
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive"
-    ]
+    scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
     return gspread.authorize(creds)
 
@@ -31,7 +29,6 @@ def load_data(sheet_name):
         spreadsheet = get_gspread_client().open_by_key(st.secrets["gcp_service_account"]["SPREADSHEET_KEY"])
         worksheet = spreadsheet.worksheet(sheet_name)
         df = pd.DataFrame(worksheet.get_all_records())
-        # 기본 데이터 타입 변환
         for col in df.columns:
             if '금액' in col or '평가액' in col:
                 df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
@@ -73,18 +70,12 @@ def to_excel(df):
 
 def extract_okpos_data(uploaded_file):
     # !중요! 이 함수는 제공해주신 OKPOS 분석 코드의 파싱 로직으로 교체해야 합니다.
-    # 아래는 예시 데이터프레임을 반환하는 코드입니다.
     st.warning("OKPOS 파일 파싱 로직이 구현되지 않았습니다. (현재는 예시 데이터로 동작)")
     try:
-        # 여기에 실제 파싱 로직 구현
         # 예시: df = pd.read_excel(uploaded_file, header=7) ...
-        # 최종적으로 ['매출일자', '지점명', '매출유형', '금액', '요일'] 컬럼을 가진 DF 반환
         data = {
-            '매출일자': [date(2025, 8, 1), date(2025, 8, 1)],
-            '지점명': ['강남점', '강남점'], 
-            '매출유형': ['홀매출', '포장매출'],
-            '금액': [500000, 150000],
-            '요일': ['금요일', '금요일']
+            '매출일자': [date(2025, 8, 1), date(2025, 8, 1)], '지점명': ['강남점', '강남점'], 
+            '매출유형': ['홀매출', '포장매출'], '금액': [500000, 150000], '요일': ['금요일', '금요일']
         }
         return pd.DataFrame(data)
     except Exception as e:
@@ -140,7 +131,6 @@ def render_store_attendance(user_info):
     st.markdown("---")
     st.markdown("##### 근무 기록 입력")
 
-    # 입력용 데이터프레임
     col_config = {
         "근무일자": st.column_config.DateColumn("근무일자", format="YYYY-MM-DD", required=True),
         "직원 이름": st.column_config.SelectboxColumn("직원 이름", options=store_employees, required=True),
@@ -154,14 +144,18 @@ def render_store_attendance(user_info):
     edited_df = st.data_editor(st.session_state.attendance_df, num_rows="dynamic", use_container_width=True, column_config=col_config)
 
     if st.button("💾 근무기록 저장", use_container_width=True, type="primary"):
-        if not edited_df.dropna().empty:
+        df_to_save = edited_df.dropna()
+        if not df_to_save.empty:
             log_entries = []
             is_valid = True
-            for _, row in edited_df.dropna().iterrows():
+            for _, row in df_to_save.iterrows():
                 try:
                     dt_str = row['근무일자'].strftime('%Y-%m-%d')
                     clock_in = f"{dt_str} {row['출근 시간']}:00"
                     clock_out = f"{dt_str} {row['퇴근 시간']}:00"
+                    # 시간 형식 유효성 검사
+                    datetime.strptime(row['출근 시간'], '%H:%M')
+                    datetime.strptime(row['퇴근 시간'], '%H:%M')
                     log_entries.append([datetime.now(), store_name, row['직원 이름'], '출근', clock_in])
                     log_entries.append([datetime.now(), store_name, row['직원 이름'], '퇴근', clock_out])
                 except Exception:
@@ -181,34 +175,35 @@ def render_store_attendance(user_info):
 def render_store_settlement(user_info):
     st.subheader("💰 정산 및 재고")
     store_name = user_info['지점명']
-
+    
+    today = date.today()
+    options = [(today - relativedelta(months=i)).strftime('%Y-%m') for i in range(12)]
+    
     with st.expander("월말 재고 자산 평가액 입력", expanded=True):
-        today = date.today()
-        options = [(today - relativedelta(months=i)).strftime('%Y-%m') for i in range(12)]
-        selected_month_str = st.selectbox("재고 평가 년/월 선택", options=options)
-        
+        selected_month_inv = st.selectbox("재고 평가 년/월 선택", options=options, key="inv_month")
         inventory_value = st.number_input("해당 월의 최종 재고 평가액(원)을 입력하세요.", min_value=0, step=10000)
 
         if st.button("💾 재고액 저장", type="primary"):
             inventory_log_df = load_data("월말재고_로그")
-            inventory_log_df['평가년월'] = pd.to_datetime(inventory_log_df['평가년월']).dt.strftime('%Y-%m')
+            if '평가년월' in inventory_log_df.columns:
+                 inventory_log_df['평가년월'] = pd.to_datetime(inventory_log_df['평가년월']).dt.strftime('%Y-%m')
             
-            existing_indices = inventory_log_df[(inventory_log_df['평가년월'] == selected_month_str) & (inventory_log_df['지점명'] == store_name)].index
+            existing_indices = inventory_log_df[(inventory_log_df['평가년월'] == selected_month_inv) & (inventory_log_df['지점명'] == store_name)].index
             
             if not existing_indices.empty:
                 inventory_log_df.loc[existing_indices, ['재고평가액', '입력일시']] = [inventory_value, datetime.now()]
             else:
-                new_row = pd.DataFrame([{'평가년월': selected_month_str, '지점명': store_name, '재고평가액': inventory_value,
+                new_row = pd.DataFrame([{'평가년월': selected_month_inv, '지점명': store_name, '재고평가액': inventory_value,
                                        '입력일시': datetime.now(), '입력자': user_info['지점ID']}])
                 inventory_log_df = pd.concat([inventory_log_df, new_row], ignore_index=True)
             
             if update_sheet("월말재고_로그", inventory_log_df):
-                st.success(f"{selected_month_str}의 재고 평가액이 {inventory_value:,.0f}원으로 저장되었습니다.")
+                st.success(f"{selected_month_inv}의 재고 평가액이 {inventory_value:,.0f}원으로 저장되었습니다.")
 
     st.markdown("---")
     st.markdown("##### 🧾 최종 정산표 확인")
+    selected_month_pl = st.selectbox("정산표 조회 년/월 선택", options=options, key="pl_month")
     
-    # 정산표 로직
     sales_log = load_data("매출_로그")
     settlement_log = load_data("일일정산_로그")
     inventory_log = load_data("월말재고_로그")
@@ -217,41 +212,36 @@ def render_store_settlement(user_info):
         st.warning("정산표를 생성하기 위한 데이터(매출, 지출, 재고)가 부족합니다.")
         return
 
-    selected_dt = datetime.strptime(selected_month_str, '%Y-%m')
-    prev_month_dt = selected_dt - relativedelta(months=1)
-    prev_month_str = prev_month_dt.strftime('%Y-%m')
+    selected_dt = datetime.strptime(selected_month_pl, '%Y-%m')
+    prev_month_str = (selected_dt - relativedelta(months=1)).strftime('%Y-%m')
 
-    # 1. 매출
-    sales_log['매출일자'] = pd.to_datetime(sales_log['매출일자']).dt.strftime('%Y-%m')
-    total_sales = sales_log[(sales_log['매출일자'] == selected_month_str) & (sales_log['지점명'] == store_name)]['금액'].sum()
+    # 데이터 타입 변환
+    sales_log['매출일자'] = pd.to_datetime(sales_log['매출일자'], errors='coerce').dt.strftime('%Y-%m')
+    settlement_log['정산일자'] = pd.to_datetime(settlement_log['정산일자'], errors='coerce').dt.strftime('%Y-%m')
+    inventory_log['평가년월'] = pd.to_datetime(inventory_log['평가년월'], errors='coerce').dt.strftime('%Y-%m')
     
-    # 2. 지출 및 재고
-    settlement_log['정산일자'] = pd.to_datetime(settlement_log['정산일자']).dt.strftime('%Y-%m')
-    store_settlement = settlement_log[(settlement_log['정산일자'] == selected_month_str) & (settlement_log['지점명'] == store_name)]
+    total_sales = sales_log[(sales_log['매출일자'] == selected_month_pl) & (sales_log['지점명'] == store_name)]['금액'].sum()
+    store_settlement = settlement_log[(settlement_log['정산일자'] == selected_month_pl) & (settlement_log['지점명'] == store_name)]
     
     food_purchase = store_settlement[store_settlement['대분류'] == '식자재']['금액'].sum()
     sga_expenses = store_settlement[store_settlement['대분류'] != '식자재']['금액'].sum()
     
-    inventory_log['평가년월'] = pd.to_datetime(inventory_log['평가년월']).dt.strftime('%Y-%m')
     begin_inv_series = inventory_log[(inventory_log['평가년월'] == prev_month_str) & (inventory_log['지점명'] == store_name)]['재고평가액']
-    end_inv_series = inventory_log[(inventory_log['평가년월'] == selected_month_str) & (inventory_log['지점명'] == store_name)]['재고평가액']
+    end_inv_series = inventory_log[(inventory_log['평가년월'] == selected_month_pl) & (inventory_log['지점명'] == store_name)]['재고평가액']
 
     begin_inv = begin_inv_series.iloc[0] if not begin_inv_series.empty else 0
     end_inv = end_inv_series.iloc[0] if not end_inv_series.empty else 0
     
-    cogs = begin_inv + food_purchase - end_inv # 식자재 원가
-    
-    # 3. 손익 계산
+    cogs = begin_inv + food_purchase - end_inv
     gross_profit = total_sales - cogs
     operating_profit = gross_profit - sga_expenses
     
-    st.markdown(f"**{selected_month_str}**월 정산표 ({store_name})")
-    summary_df = pd.DataFrame({
+    summary_data = {
         '항목': ['I. 총매출', 'II. 식자재 원가 (COGS)', 'III. 매출 총이익', 'IV. 판매비와 관리비', 'V. 영업이익'],
         '금액 (원)': [total_sales, cogs, gross_profit, sga_expenses, operating_profit]
-    })
+    }
+    summary_df = pd.DataFrame(summary_data)
     st.table(summary_df.style.format({'금액 (원)': '{:,.0f}'}))
-
 
 def render_store_employee_info(user_info):
     st.subheader("👥 직원 정보")
@@ -278,7 +268,7 @@ def render_store_employee_info(user_info):
     st.markdown("---")
     st.markdown("##### 우리 지점 직원 목록")
     display_cols = ['이름', '직책', '입사일', '연락처', '보건증만료일']
-    st.dataframe(store_employees_df[display_cols].astype(str), use_container_width=True, hide_index=True)
+    st.dataframe(store_employees_df[display_cols].astype(str).replace('NaT',''), use_container_width=True, hide_index=True)
 
 
 # =============================================================================
@@ -287,6 +277,7 @@ def render_store_employee_info(user_info):
 
 def render_admin_dashboard():
     st.subheader("📊 통합 대시보드")
+    # 여기에 Plotly 차트 등 대시보드 기능 구현
     st.info("전체 지점 데이터 종합 대시보드 기능이 여기에 구현될 예정입니다.")
 
 def render_admin_settlement_input():
@@ -304,13 +295,10 @@ def render_admin_settlement_input():
     
     st.markdown("---")
     
-    # 대분류 목록
     categories = ['식자재', '인건비', '판매/마케팅비', '고정비', '공과금', '소모품비', '기타비용']
-    
     col_config = {
         "대분류": st.column_config.SelectboxColumn("대분류", options=categories, required=True),
-        "중분류": st.column_config.TextColumn("중분류", required=True),
-        "상세내용": st.column_config.TextColumn("상세내용"),
+        "중분류": st.column_config.TextColumn("중분류", required=True), "상세내용": st.column_config.TextColumn("상세내용"),
         "금액": st.column_config.NumberColumn("금액 (원)", format="%d", required=True),
     }
 
@@ -320,14 +308,13 @@ def render_admin_settlement_input():
     edited_df = st.data_editor(st.session_state.settlement_df, num_rows="dynamic", use_container_width=True, column_config=col_config)
     
     if st.button("💾 정산 내역 저장", use_container_width=True, type="primary"):
-        if not edited_df.dropna(subset=['대분류','중분류','금액']).empty:
-            df_to_save = edited_df.dropna(subset=['대분류','중분류','금액']).copy()
-            df_to_save['입력일시'] = datetime.now()
-            df_to_save['정산일자'] = pd.to_datetime(selected_month_str + "-01")
+        df_to_save = edited_df.dropna(subset=['대분류','중분류','금액'])
+        if not df_to_save.empty:
+            df_to_save['입력일시'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            df_to_save['정산일자'] = (selected_month_str + "-01")
             df_to_save['지점명'] = selected_store
             df_to_save['입력자'] = st.session_state['user_info']['지점ID']
             
-            # 최종 저장할 컬럼 순서
             final_cols = ['입력일시', '정산일자', '지점명', '대분류', '중분류', '상세내용', '금액', '입력자']
             if append_rows("일일정산_로그", df_to_save[final_cols]):
                 st.success(f"{selected_store}의 {selected_month_str} 정산 내역이 저장되었습니다.")
@@ -335,7 +322,6 @@ def render_admin_settlement_input():
                 st.rerun()
         else:
             st.warning("입력된 정산 내역이 없습니다.")
-
 
 def render_admin_employee_management():
     st.subheader("🗂️ 전 직원 관리")
@@ -362,7 +348,6 @@ def render_admin_employee_management():
         st.markdown("##### 보건증 현황")
         st.info("전체 직원의 보건증 현황 기능이 여기에 구현될 예정입니다.")
 
-
 def render_admin_settings():
     st.subheader("⚙️ 데이터 및 설정")
 
@@ -386,7 +371,6 @@ def render_admin_settings():
         if st.button("💾 지점 정보 전체 저장"):
             if update_sheet("지점마스터", pd.DataFrame(edited_stores_df)):
                 st.success("지점 정보가 업데이트되었습니다.")
-
 
 # =============================================================================
 # 4. 메인 실행 로직
@@ -425,6 +409,3 @@ else:
         with store_tabs[0]: render_store_attendance(user_info)
         with store_tabs[1]: render_store_settlement(user_info)
         with store_tabs[2]: render_store_employee_info(user_info)
-
-
-
