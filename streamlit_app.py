@@ -8,7 +8,7 @@ from datetime import datetime, date, time, timedelta
 from dateutil.relativedelta import relativedelta
 import re
 import holidays
-import io # Excel export functionality
+import io
 
 # =============================================================================
 # 0. 기본 설정 및 구글 시트 연결
@@ -40,12 +40,19 @@ def load_data(sheet_name):
         st.error(f"'{sheet_name}' 시트 로딩 오류: {e}")
         return pd.DataFrame()
 
+# [오류 해결] 시트를 먼저 비우고 업데이트하도록 함수 수정
 def update_sheet(sheet_name, df):
     try:
         spreadsheet = get_gspread_client().open_by_key(st.secrets["gcp_service_account"]["SPREADSHEET_KEY"])
         worksheet = spreadsheet.worksheet(sheet_name)
+        
+        # 시트를 깨끗하게 비움
+        worksheet.clear()
+        
+        # 새 데이터로 업데이트
         df_str = df.astype(str).replace('nan', '').replace('NaT', '')
         worksheet.update([df_str.columns.values.tolist()] + df_str.values.tolist(), value_input_option='USER_ENTERED')
+        
         st.cache_data.clear()
         return True
     except Exception as e:
@@ -81,7 +88,6 @@ def check_health_cert_expiration(user_info):
     if expiring_soon_list:
         st.sidebar.warning("🚨 보건증 만료 임박\n" + "\n".join(expiring_soon_list))
 
-# [개선] Excel export function
 def to_excel(df):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -137,9 +143,8 @@ def render_store_attendance(user_info):
     month_records_df = pd.DataFrame()
 
     if not attendance_detail_df.empty and '근무일자' in attendance_detail_df.columns:
-        attendance_detail_df['근무일자'] = pd.to_datetime(attendance_detail_df['근무일자'], errors='coerce').dt.strftime('%Y-%m-%d')
         month_records_df = attendance_detail_df[
-            (pd.to_datetime(attendance_detail_df['근무일자']).dt.strftime('%Y-%m') == selected_month.strftime('%Y-%m')) &
+            (pd.to_datetime(attendance_detail_df['근무일자'], errors='coerce').dt.strftime('%Y-%m') == selected_month.strftime('%Y-%m')) &
             (attendance_detail_df['지점명'] == store_name)
         ].copy()
 
@@ -233,19 +238,16 @@ def render_store_attendance(user_info):
     if st.button(f"💾 {selected_date.strftime('%m월 %d일')} 기록 저장", type="primary", use_container_width=True):
         error_found = False
         
-        # [개선] 방어 로직 1: 필수 값 누락 확인
         if edited_df.isnull().values.any():
             st.error("필수 항목(이름, 구분, 출/퇴근 시간)이 비어있습니다. 모든 항목을 채워주세요.")
             error_found = True
 
-        # [개선] 방어 로직 2: 시간 형식 검증
         time_pattern = re.compile(r'^([01]\d|2[0-3]):([0-5]\d)$')
         invalid_time_rows = [str(r['직원이름']) for i, r in edited_df.iterrows() if not time_pattern.match(str(r['출근시간'])) or not time_pattern.match(str(r['퇴근시간']))]
         if invalid_time_rows:
             st.error(f"시간 형식이 잘못되었습니다 (HH:MM). 다음 직원의 시간을 확인해주세요: {', '.join(set(invalid_time_rows))}")
             error_found = True
 
-        # [개선] 방어 로직 3: 시간 중복(Overlap) 검증
         if not error_found:
             df_for_check = edited_df.copy()
             df_for_check['start_dt'] = pd.to_datetime(selected_date.strftime('%Y-%m-%d') + ' ' + df_for_check['출근시간'], errors='coerce')
@@ -264,7 +266,6 @@ def render_store_attendance(user_info):
                 st.error(f"근무 시간이 겹칩니다. 다음 직원의 기록을 확인해주세요: {', '.join(set(overlap_employees))}")
                 error_found = True
         
-        # 모든 검증 통과 시 저장
         if not error_found:
             other_records = attendance_detail_df[attendance_detail_df['근무일자'] != selected_date.strftime('%Y-%m-%d')]
             new_details = edited_df.copy()
@@ -300,7 +301,7 @@ def render_store_attendance(user_info):
             mime="application/vnd.ms-excel",
             use_container_width=True
         )
-        
+
 def render_store_settlement(user_info):
     # This function remains unchanged
     st.subheader("💰 정산 및 재고")
@@ -325,7 +326,7 @@ def render_store_settlement(user_info):
             if st.form_submit_button("💾 일일 기록 저장", use_container_width=True, type="primary"):
                 sales_data, expense_data = [], []
                 if sales_card > 0: sales_data.append([log_date, store_name, '카드매출', sales_card, log_date.strftime('%A')])
-                if sales_cash > 0: sales_data.append([log_date, store_name, '현금매출', sales_cash, log_date.strftime('%A')])
+                if sales_cash > 0: expense_data.append([log_date, store_name, '현금매출', sales_cash, log_date.strftime('%A')])
                 if sales_delivery > 0: sales_data.append([log_date, store_name, '배달매출', sales_delivery, log_date.strftime('%A')])
                 if exp_food > 0: expense_data.append([log_date, store_name, '식자재', '식자재 구매', exp_food, user_info['지점ID']])
                 if exp_sga_amount > 0: expense_data.append([log_date, store_name, '판관비', exp_sga_cat, exp_sga_amount, user_info['지점ID']])
@@ -474,8 +475,4 @@ else:
         with store_tabs[0]: render_store_attendance(user_info)
         with store_tabs[1]: render_store_settlement(user_info)
         with store_tabs[2]: render_store_employee_info(user_info)
-
-
-
-
 
