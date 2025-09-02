@@ -198,13 +198,19 @@ def render_store_attendance(user_info):
         try:
             day = int(col.name.replace('일', ''))
             d = date(selected_month.year, selected_month.month, day)
-            if d in kr_holidays: return ['background-color: #ffcccc'] * len(col)
-            if d.weekday() == 6: return ['background-color: #ffdddd'] * len(col) # 일요일
-            if d.weekday() == 5: return ['background-color: #ddeeff'] * len(col) # 토요일
-        except (ValueError, TypeError): pass
-        return [''] * len(col)
+            styles = [''] * len(col) # 기본 스타일은 공백
+            if d in kr_holidays:
+                styles = ['background-color: #ffcccc'] * len(col)
+            elif d.weekday() == 6: # Sunday
+                styles = ['background-color: #ffdddd'] * len(col)
+            elif d.weekday() == 5: # Saturday
+                styles = ['background-color: #ddeeff'] * len(col)
+            return styles
+        except (ValueError, TypeError):
+            return [''] * len(col)
 
-    st.dataframe(summary_pivot.style.apply(style_day_columns, axis=0).format("{:.1f}", na_rep=""), use_container_width=True)
+    # [오류 해결] na_rep="" 대신 format 함수로 None 값 처리
+    st.dataframe(summary_pivot.style.apply(style_day_columns, axis=0).format(lambda val: f"{val:.1f}" if pd.notna(val) else ""), use_container_width=True)
     
     st.markdown("---")
     st.markdown("##### ✍️ **일일 근무 기록 상세 관리**")
@@ -212,8 +218,9 @@ def render_store_attendance(user_info):
     selected_date = st.date_input("관리할 날짜 선택", value=start_date, min_value=start_date, max_value=end_date)
     daily_records_df = month_records_df[month_records_df['근무일자'] == selected_date.strftime('%Y-%m-%d')].copy()
     
-    # 총시간, 지점명은 편집에서 제외
+    # [개선] 불필요한 열 제거 및 인덱스 초기화
     daily_records_df.drop(columns=['총시간', '지점명'], inplace=True, errors='ignore')
+    daily_records_df.reset_index(drop=True, inplace=True)
 
     st.info(f"**{selected_date.strftime('%Y년 %m월 %d일')}** 기록을 아래 표에서 직접 수정, 추가, 삭제하세요.")
 
@@ -229,7 +236,6 @@ def render_store_attendance(user_info):
             "비고": st.column_config.TextColumn("비고"),
         },
         hide_index=True,
-        # 컬럼 순서 지정
         column_order=["직원이름", "구분", "출근시간", "퇴근시간", "비고"]
     )
 
@@ -240,20 +246,28 @@ def render_store_attendance(user_info):
         if invalid_rows:
             st.error(f"시간 형식이 잘못되었습니다 (HH:MM). 다음 직원의 시간을 확인해주세요: {', '.join(set(invalid_rows))}")
         else:
-            # [개선] 행 추가 로직 강화
-            # 원본 상세 기록에서 오늘 날짜 기록은 모두 제거 (덮어쓰기 준비)
-            other_records = attendance_detail_df[attendance_detail_df['근무일자'] != selected_date.strftime('%Y-%m-%d')]
-            
+            # [오류 해결] 저장 로직 전면 개편
+            # 1. 시트에서 오늘 날짜를 제외한 모든 기록을 가져옴
+            if not attendance_detail_df.empty:
+                other_records = attendance_detail_df[attendance_detail_df['근무일자'] != selected_date.strftime('%Y-%m-%d')]
+            else:
+                other_records = pd.DataFrame()
+
+            # 2. 오늘 수정한 기록(edited_df)을 가져옴
             new_details_to_add = edited_df.copy()
-            # 새로 추가된 행에 ID, 지점명, 근무일자 채우기
+            
+            # 3. 새로 추가된 행에 ID, 지점명, 근무일자 채우기
             for i, row in new_details_to_add.iterrows():
-                # '기록ID'가 비어있으면(새로 추가된 행), 새 ID를 부여
+                # '기록ID'가 비어있으면 (새로 추가된 행), 새 ID 부여
                 if pd.isna(row.get('기록ID')) or row.get('기록ID') == '':
                     new_details_to_add.at[i, '기록ID'] = f"manual_{selected_date.strftime('%y%m%d')}_{row['직원이름']}_{int(datetime.now().timestamp()) + i}"
                 new_details_to_add.at[i, '지점명'] = store_name
                 new_details_to_add.at[i, '근무일자'] = selected_date.strftime('%Y-%m-%d')
-
+            
+            # 4. 다른 날짜 기록과 오늘 수정된 기록을 합쳐서 최종본 생성
             final_sheet_df = pd.concat([other_records, new_details_to_add], ignore_index=True)
+            
+            # 5. 구글 시트 업데이트
             if update_sheet("근무기록_상세", final_sheet_df):
                 st.success("변경사항이 성공적으로 저장되었습니다."); st.rerun()
 
@@ -278,7 +292,7 @@ def render_store_attendance(user_info):
             mime="application/vnd.ms-excel",
             use_container_width=True
         )
-
+        
 def render_store_settlement(user_info):
     # This function remains unchanged
     st.subheader("💰 정산 및 재고")
@@ -452,5 +466,6 @@ else:
         with store_tabs[0]: render_store_attendance(user_info)
         with store_tabs[1]: render_store_settlement(user_info)
         with store_tabs[2]: render_store_employee_info(user_info)
+
 
 
