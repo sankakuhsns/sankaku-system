@@ -127,42 +127,131 @@ def login_screen():
 # 2. 지점 (Store) 페이지 기능
 # =============================================================================
 
+# streamlit_app.py 파일에서 이 함수를 찾아 아래 코드로 교체하세요.
+# 맨 위에 'import holidays'를 추가해야 합니다.
+import holidays
+
 def render_store_attendance(user_info):
     st.subheader("⏰ 월별 근무기록 관리")
     store_name = user_info['지점명']
 
+    # --- 데이터 로딩 ---
     employees_df = load_data("직원마스터")
     store_employees_df = employees_df[(employees_df['소속지점'] == store_name) & (employees_df['재직상태'] == '재직중')]
-
     if store_employees_df.empty:
         st.warning("먼저 '직원마스터' 시트에 해당 지점의 재직중인 직원을 등록해주세요."); return
-
     if '근무요일' not in store_employees_df.columns:
         st.error("'직원마스터' 시트에 '근무요일', '기본출근', '기본퇴근' 컬럼을 추가해야 합니다."); return
 
+    # --- 날짜 및 공휴일 설정 ---
     today = date.today()
     options = [(today - relativedelta(months=i)).strftime('%Y년 / %m월') for i in range(12)]
     selected_month_str_display = st.selectbox("관리할 년/월 선택", options=options)
     selected_month = datetime.strptime(selected_month_str_display, '%Y년 / %m월')
+    kr_holidays = holidays.KR(years=selected_month.year)
+
+    # --- 1. 월별 근무 현황표 (숫자 달력) ---
+    st.markdown("##### 🗓️ **월별 근무 현황표**")
+    
+    # 상세 근무기록 불러오기
+    attendance_detail_df = load_data("근무기록_상세")
+    if '근무일자' in attendance_detail_df.columns:
+        attendance_detail_df['근무일자'] = pd.to_datetime(attendance_detail_df['근무일자'])
+        month_attendance_df = attendance_detail_df[
+            (attendance_detail_df['근무일자'].dt.strftime('%Y-%m') == selected_month.strftime('%Y-%m')) &
+            (attendance_detail_df['지점명'] == store_name)
+        ]
+    else:
+        month_attendance_df = pd.DataFrame()
+
+    # 근무 현황표(Pivot Table) 생성
+    if not month_attendance_df.empty:
+        timesheet = month_attendance_df.pivot_table(index='직원이름', columns=month_attendance_df['근무일자'].dt.day, values='총시간', aggfunc='sum')
+        timesheet.columns = [f"{col}일" for col in timesheet.columns]
+        
+        # 주말 및 공휴일 스타일링
+        def style_day_columns(df):
+            style = pd.DataFrame('', index=df.index, columns=df.columns)
+            for day in range(1, selected_month.replace(month=selected_month.month % 12 + 1, day=1).day if selected_month.month != 12 else 32):
+                try:
+                    current_date = date(selected_month.year, selected_month.month, day)
+                    col_name = f"{day}일"
+                    if col_name in df.columns:
+                        if current_date in kr_holidays:
+                            style[col_name] = 'background-color: #ffe0e0' # 공휴일
+                        elif current_date.weekday() == 6: # 일요일
+                            style[col_name] = 'background-color: #ffefef'
+                        elif current_date.weekday() == 5: # 토요일
+                            style[col_name] = 'background-color: #f0f5ff'
+                except ValueError:
+                    continue
+            return style
+        
+        st.dataframe(timesheet.style.apply(style_day_columns, axis=None).format("{:.1f}", na_rep=""), use_container_width=True)
+    else:
+        st.info(f"{selected_month_str_display}에 등록된 근무기록이 없습니다. 아래에서 상세 기록을 추가해주세요.")
 
     st.markdown("---")
-    st.markdown("##### 🗓️ **월별 근무 현황표 (시간 직접 수정)**")
-    st.info("자동 생성된 근무 시간을 확인하고, 휴가/연장근무 등 변경된 시간을 직접 수정하세요. (휴가/결근 시 칸을 비워주세요)")
 
-    schedule_key = f"timesheet_{selected_month.strftime('%Y-%m')}"
-    if schedule_key not in st.session_state:
-        st.session_state[schedule_key] = generate_schedule(selected_month.year, selected_month.month, store_employees_df)
+    # --- 2. 상세 근무 기록 추가/수정 ---
+    st.markdown("##### ✍️ **상세 근무 기록 추가 및 수정**")
+    st.info("직원의 기본 스케줄을 바탕으로 근무를 추가하거나, 특정 날짜의 근무 유형을 변경할 수 있습니다.")
 
-    edited_timesheet = st.data_editor(st.session_state[schedule_key], use_container_width=True, key=f"editor_{schedule_key}")
+    with st.form("attendance_detail_form"):
+        col1, col2, col3 = st.columns(3)
+        emp_name = col1.selectbox("직원 선택", store_employees_df['이름'].tolist())
+        work_date = col2.date_input("날짜 선택", selected_month.date())
+        work_type = col3.selectbox("근무 유형", ["정상근무", "연장근무", "유급휴가", "무급휴가", "결근"])
 
-    total_hours = 0
-    for col in edited_timesheet.columns:
-        total_hours += pd.to_numeric(edited_timesheet[col], errors='coerce').sum()
+        # 직원의 기본 근무시간 자동 제안
+        emp_info = store_employees_df[store_employees_df['이름'] == emp_name].iloc[0]
+        default_start = emp_info.get('기본출근', '09:00')
+        default_end = emp_info.get('기본퇴근', '18:00')
+
+        col4, col5 = st.columns(2)
+        start_time_str = col4.text_input("출근 시간 (HH:MM)", default_start)
+        end_time_str = col5.text_input("퇴근 시간 (HH:MM)", default_end)
+        
+        notes = st.text_input("비고 (선택 사항)")
+        
+        submitted = st.form_submit_button("💾 기록 추가/수정하기", use_container_width=True, type="primary")
+        if submitted:
+            try:
+                start_dt = datetime.strptime(start_time_str, "%H:%M")
+                end_dt = datetime.strptime(end_time_str, "%H:%M")
+                duration = (end_dt - start_dt).total_seconds() / 3600
+                if duration < 0: duration += 24
+                
+                new_record = pd.DataFrame([{
+                    "기록ID": f"{work_date.strftime('%y%m%d')}_{store_name}_{emp_name}",
+                    "지점명": store_name, "근무일자": work_date.strftime('%Y-%m-%d'),
+                    "직원이름": emp_name, "구분": work_type,
+                    "출근시간": start_time_str, "퇴근시간": end_time_str,
+                    "총시간": duration, "비고": notes
+                }])
+                
+                # 기존 기록이 있으면 덮어쓰기(수정), 없으면 추가
+                if not attendance_detail_df.empty:
+                    attendance_detail_df = attendance_detail_df[attendance_detail_df['기록ID'] != new_record['기록ID'].iloc[0]]
+                
+                final_df = pd.concat([attendance_detail_df, new_record], ignore_index=True)
+                
+                if update_sheet("근무기록_상세", final_df):
+                    st.success(f"{emp_name} 직원의 {work_date.strftime('%Y-%m-%d')} 근무기록이 저장되었습니다.")
+                    st.rerun()
+
+            except Exception as e:
+                st.error(f"저장 중 오류 발생: {e}. 시간 형식을(HH:MM) 확인해주세요.")
+                
+    st.markdown("---")
     
-    st.metric(label=f"**{selected_month_str_display} 예상 총 근무시간**", value=f"{total_hours:.2f} 시간")
-
-    if st.button("✅ 이달 근무기록 최종 확정", use_container_width=True, type="primary"):
-        st.success("근무기록이 성공적으로 확정되었습니다. (현재는 저장 로직 구현 전)")
+    # --- 3. 직원별 근무 시간 집계 ---
+    st.markdown("##### 📊 **직원별 근무 시간 집계**")
+    if not month_attendance_df.empty:
+        summary = month_attendance_df.pivot_table(index='직원이름', columns='구분', values='총시간', aggfunc='sum', fill_value=0)
+        st.dataframe(summary.style.format("{:.1f} 시간"), use_container_width=True)
+    else:
+        st.info("집계할 근무기록이 없습니다.")
 
 
 def render_store_settlement(user_info):
@@ -229,3 +318,4 @@ else:
         with store_tabs[0]: render_store_attendance(user_info)
         with store_tabs[1]: render_store_settlement(user_info)
         with store_tabs[2]: render_store_employee_info(user_info)
+
