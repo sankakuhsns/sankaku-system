@@ -449,19 +449,106 @@ def render_store_employee_info(user_info):
 # =============================================================================
 def render_admin_dashboard():
     st.subheader("📊 통합 대시보드")
-    st.info("전체 지점 데이터 종합 대시보드 기능이 여기에 구현될 예정입니다.")
+    
+    # 예시 데이터 생성
+    sales_data = pd.DataFrame({
+        '월': ['2025-05', '2025-06', '2025-07', '2025-08', '2025-09'],
+        '전체 매출': [1200, 1500, 1400, 1800, 1750],
+        '총 지출': [500, 600, 550, 650, 620]
+    })
+    sales_data['순이익'] = sales_data['전체 매출'] - sales_data['총 지출']
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("💰 전체 매출 (9월)", f"₩ {sales_data.loc[4, '전체 매출']:,}")
+    col2.metric("💸 총 지출 (9월)", f"₩ {sales_data.loc[4, '총 지출']:,}")
+    col3.metric("📈 순이익 (9월)", f"₩ {sales_data.loc[4, '순이익']:,}")
+
+    st.markdown("---")
+    st.write("📈 **월별 매출 추이**")
+    st.line_chart(sales_data, x='월', y=['전체 매출', '총 지출', '순이익'])
 
 def render_admin_settlement_input():
     st.subheader("✍️ 월별 정산 입력")
-    st.info("월별/지점별 지출 내역 입력 기능이 여기에 구현될 예정입니다.")
+    
+    today = datetime.now().date()
+    selected_month = st.date_input("정산할 월 선택", value=today, format="YYYY/MM")
+    
+    stores = ['전대점', '상무점', '수완점']
+    selected_store = st.selectbox("지점 선택", stores)
+    
+    st.markdown(f"**{selected_store}**의 **{selected_month.strftime('%Y년 %m월')}** 지출 내역")
+    
+    # 예시 데이터 (실제로는 DB에서 불러와야 함)
+    settlement_df = pd.DataFrame({
+        '비용 항목': ['식자재 구매', '수도/전기세', '인건비', '기타'],
+        '금액': [1500000, 200000, 1800000, 50000],
+        '비고': ['09/01 식자재 발주', '09월분', '09월 급여', '']
+    })
+    
+    st.data_editor(
+        settlement_df,
+        num_rows="dynamic",
+        use_container_width=True
+    )
+    st.button("정산 데이터 저장", use_container_width=True)
 
 def render_admin_employee_management():
     st.subheader("🗂️ 전 직원 관리")
-    st.info("전체 직원 정보, 출근부, 보건증 현황 관리 기능이 여기에 구현될 예정입니다.")
+    
+    stores = ['전체 지점', '전대점', '상무점', '수완점']
+    selected_store = st.selectbox("지점 선택", stores)
+    
+    # 예시 데이터 (실제로는 DB에서 불러와야 함)
+    employee_data = {
+        '이름': ['김민준', '박서준', '이지은'],
+        '지점': ['전대점', '상무점', '수완점'],
+        '연락처': ['010-1234-5678', '010-9876-5432', '010-5555-4444'],
+        '입사일': ['2024-03-15', '2024-05-20', '2023-11-01'],
+        '보건증 만료일': [datetime.now().date() + timedelta(days=90), 
+                         datetime.now().date() + timedelta(days=30), 
+                         datetime.now().date() - timedelta(days=10)]
+    }
+    employee_df = pd.DataFrame(employee_data)
+    
+    if selected_store != '전체 지점':
+        employee_df = employee_df[employee_df['지점'] == selected_store]
+        
+    employee_df['보건증 만료'] = employee_df['보건증 만료일'].apply(
+        lambda x: "🔴 만료 임박/만료" if x <= datetime.now().date() + timedelta(days=30) else "🟢 유효"
+    )
+    
+    st.markdown(f"**{selected_store}** 직원 목록")
+    st.data_editor(
+        employee_df,
+        column_order=['이름', '지점', '연락처', '입사일', '보건증 만료일', '보건증 만료'],
+        hide_index=True,
+        use_container_width=True
+    )
+    st.button("직원 정보 저장", use_container_width=True)
 
 def render_admin_settings():
     st.subheader("⚙️ 데이터 및 설정")
-    st.info("OKPOS 파일 업로드, 지점 계정 관리 기능이 여기에 구현될 예정입니다.")
+    
+    st.write("📂 **데이터 업로드**")
+    uploaded_file = st.file_uploader("OKPOS 파일 업로드 (CSV, XLSX)", type=["csv", "xlsx"])
+    if uploaded_file:
+        st.success(f"파일 '{uploaded_file.name}'이 성공적으로 업로드되었습니다.")
+    
+    st.markdown("---")
+    
+    st.write("👥 **지점 계정 관리**")
+    # 예시 데이터 (실제로는 DB에서 불러와야 함)
+    account_df = pd.DataFrame({
+        '지점': ['전대점', '상무점', '수완점'],
+        '아이디': ['jundae_admin', 'sangmu_admin', 'suwan_admin'],
+        '비고': ['전대점 관리자 계정', '상무점 관리자 계정', '수완점 관리자 계정']
+    })
+    st.data_editor(
+        account_df,
+        num_rows="dynamic",
+        use_container_width=True
+    )
+    st.button("지점 계정 정보 저장", use_container_width=True)
 
 # =============================================================================
 # 4. 메인 실행 로직
@@ -497,5 +584,6 @@ else:
         with store_tabs[0]: render_store_attendance(user_info)
         with store_tabs[1]: render_store_settlement(user_info)
         with store_tabs[2]: render_store_employee_info(user_info)
+
 
 
