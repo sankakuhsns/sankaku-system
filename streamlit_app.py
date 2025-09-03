@@ -11,7 +11,7 @@ import random
 import string
 
 # =============================================================================
-# 0. 기본 설정 및 상수 정의 (수정)
+# 0. 기본 설정 및 상수 정의
 # =============================================================================
 st.set_page_config(page_title="산카쿠 통합 관리 시스템", page_icon="🏢", layout="wide")
 
@@ -21,10 +21,10 @@ SHEET_NAMES = {
     "INVENTORY_MASTER": "재고마스터", "INVENTORY_DETAIL_LOG": "월말재고_상세로그",
     "SALES_LOG": "매출_로그", "SETTLEMENT_LOG": "일일정산_로그",
     "PERSONNEL_TRANSFER_LOG": "인사이동_로그", "SETTLEMENT_LOCK_LOG": "정산_마감_로그",
-    "DISPATCH_LOG": "파견_로그",
-    "PERSONNEL_REQUEST_LOG": "인사요청_로그" # <<< 이 부분이 추가되었습니다.
+    "DISPATCH_LOG": "파견_로그", "PERSONNEL_REQUEST_LOG": "인사요청_로그"
 }
 THEME = { "BORDER": "#e8e8ee", "PRIMARY": "#1C6758", "BG": "#f7f8fa", "TEXT": "#222" }
+
 # =============================================================================
 # 1. 구글 시트 연결 및 데이터 처리 함수
 # =============================================================================
@@ -224,7 +224,7 @@ def render_store_attendance(user_info, employees_df, attendance_detail_df, lock_
         
     locked_months_df = lock_log_df[
         (lock_log_df['지점명'] == store_name) & (lock_log_df['마감유형'] == '근무')
-    ] if not lock_log_df.empty else pd.DataFrame(columns=['마감년월', '상태'])
+    ] if not lock_log_df.empty and '지점명' in lock_log_df.columns and '마감유형' in lock_log_df.columns else pd.DataFrame(columns=['마감년월', '상태'])
 
     month_options = [(date.today() - relativedelta(months=i)).replace(day=1) for i in range(4)]
     available_months = [m for m in month_options if m.strftime('%Y-%m') not in locked_months_df.get('마감년월', pd.Series(dtype=str)).tolist()]
@@ -410,7 +410,7 @@ def render_store_inventory_check(user_info, inventory_master_df, inventory_log_d
 
     locked_months_df = lock_log_df[
         (lock_log_df['지점명'] == store_name) & (lock_log_df['마감유형'] == '재고')
-    ] if not lock_log_df.empty else pd.DataFrame(columns=['마감년월', '상태'])
+    ] if not lock_log_df.empty and '지점명' in lock_log_df.columns and '마감유형' in lock_log_df.columns else pd.DataFrame(columns=['마감년월', '상태'])
     
     month_options = [(date.today() - relativedelta(months=i)).replace(day=1) for i in range(4)]
     available_months = [m for m in month_options if m.strftime('%Y-%m') not in locked_months_df.get('마감년월', pd.Series(dtype=str)).tolist()]
@@ -592,15 +592,31 @@ def render_admin_settlement(sales_df, settlement_df, stores_df):
     st.info("엑셀 파일로 매출 및 지출을 일괄 업로드할 수 있습니다.")
     
     tab1, tab2 = st.tabs(["📂 매출 정보 관리", "✍️ 지출 정보 관리"])
+
     with tab1:
         template_df = pd.DataFrame([{"매출일자": "2025-09-01", "지점명": "전대점", "매출유형": "카드매출", "금액": 100000, "요일": "월"}])
         output = io.BytesIO()
         template_df.to_excel(output, index=False, sheet_name='매출 업로드 양식')
         st.download_button("📥 매출 엑셀 양식 다운로드", data=output.getvalue(), file_name="매출_업로드_양식.xlsx")
+
         uploaded_file = st.file_uploader("매출 엑셀 파일 업로드", type=["xlsx"], key="sales_uploader")
         if uploaded_file:
-            # (매출 업로드 로직)
-            pass
+            try:
+                upload_df = pd.read_excel(uploaded_file)
+                # 날짜 형식 통일
+                upload_df['매출일자'] = pd.to_datetime(upload_df['매출일자']).dt.strftime('%Y-%m-%d')
+                st.dataframe(upload_df, use_container_width=True)
+
+                if st.button("⬆️ 매출 데이터 저장하기", type="primary"):
+                    required_cols = ["매출일자", "지점명", "매출유형", "금액", "요일"]
+                    if not all(col in upload_df.columns for col in required_cols):
+                        st.error("엑셀 파일의 컬럼이 양식과 다릅니다. 양식을 확인해주세요.")
+                    else:
+                        if append_rows_and_clear_cache(SHEET_NAMES["SALES_LOG"], upload_df):
+                            st.toast(f"✅ 매출 데이터 {len(upload_df)}건이 성공적으로 저장되었습니다."); st.rerun()
+            except Exception as e:
+                st.error(f"파일을 읽는 중 오류가 발생했습니다: {e}")
+
         if not sales_df.empty:
             min_date, max_date = sales_df['매출일자'].min(), sales_df['매출일자'].max()
             st.success(f"현재 **{len(sales_df)}**건의 매출 데이터가 저장되어 있습니다. (기간: {min_date} ~ {max_date})")
@@ -610,14 +626,27 @@ def render_admin_settlement(sales_df, settlement_df, stores_df):
         output = io.BytesIO()
         template_df.to_excel(output, index=False, sheet_name='지출 업로드 양식')
         st.download_button("📥 지출 엑셀 양식 다운로드", data=output.getvalue(), file_name="지출_업로드_양식.xlsx")
-        uploaded_file = st.file_uploader("지출 엑셀 파일 업로드", type=["xlsx"], key="settlement_uploader")
-        if uploaded_file:
-            # (지출 업로드 로직)
-            pass
+        
+        uploaded_file_exp = st.file_uploader("지출 엑셀 파일 업로드", type=["xlsx"], key="settlement_uploader")
+        if uploaded_file_exp:
+            try:
+                upload_df_exp = pd.read_excel(uploaded_file_exp)
+                upload_df_exp['정산일자'] = pd.to_datetime(upload_df_exp['정산일자']).dt.strftime('%Y-%m-%d')
+                upload_df_exp['입력일시'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                upload_df_exp['입력자'] = st.session_state['user_info']['지점ID']
+                st.dataframe(upload_df_exp, use_container_width=True)
+
+                if st.button("⬆️ 지출 데이터 저장하기", type="primary"):
+                    if append_rows_and_clear_cache(SHEET_NAMES["SETTLEMENT_LOG"], upload_df_exp):
+                        st.toast(f"✅ 지출 데이터 {len(upload_df_exp)}건이 성공적으로 저장되었습니다."); st.rerun()
+
+            except Exception as e:
+                st.error(f"파일을 읽는 중 오류가 발생했습니다: {e}")
+
         if not settlement_df.empty:
             min_date, max_date = settlement_df['정산일자'].min(), settlement_df['정산일자'].max()
             st.success(f"현재 **{len(settlement_df)}**건의 지출 데이터가 저장되어 있습니다. (기간: {min_date} ~ {max_date})")
-
+            
 def render_admin_analysis(sales_df, settlement_df, inventory_log_df, employees_df):
     st.subheader("📈 지점 분석")
     if sales_df.empty:
@@ -722,24 +751,82 @@ def render_admin_inventory(inventory_master_df, inventory_detail_log_df):
             if update_sheet_and_clear_cache(SHEET_NAMES["INVENTORY_MASTER"], edited_master):
                 st.toast("✅ 재고마스터가 성공적으로 업데이트되었습니다."); st.rerun()
 
-def render_admin_approval(lock_log_df, personnel_request_log_df, employees_df):
+def render_admin_approval(lock_log_df, personnel_request_log_df, employees_df, stores_df, dispatch_log_df):
     st.subheader("✅ 승인 관리")
     st.info("지점에서 요청한 '정산 마감' 및 '인사 이동/파견' 건을 처리합니다.")
     
-    tab1, tab2 = st.tabs(["정산 마감 요청", "인사 이동/파견 요청"])
+    tab1, tab2 = st.tabs([f"정산 마감 요청 ({len(lock_log_df[lock_log_df['상태'] == '요청'])})", f"인사 이동/파견 요청 ({len(personnel_request_log_df[personnel_request_log_df['상태'] == '요청'])})"])
+    
     with tab1:
-        pending_locks = lock_log_df[lock_log_df['상태'] == '요청']
-        st.dataframe(pending_locks)
-        # (마감 승인/반려 로직)
-    with tab2:
-        pending_personnel = personnel_request_log_df[personnel_request_log_df['상태'] == '요청']
-        st.dataframe(pending_personnel)
-        # (인사 승인/반려 로직)
+        pending_locks = lock_log_df[lock_log_df['상태'] == '요청'].copy()
+        if pending_locks.empty:
+            st.info("처리 대기 중인 정산 마감 요청이 없습니다.")
+        else:
+            st.dataframe(pending_locks, use_container_width=True, hide_index=True)
+            
+            selected_req_index = st.selectbox("처리할 요청 선택 (선택)", options=[""] + pending_locks.index.tolist(), format_func=lambda x: f"{pending_locks.loc[x, '마감년월']} / {pending_locks.loc[x, '지점명']} / {pending_locks.loc[x, '마감유형']}" if x != "" else "선택하세요")
 
-def render_admin_settings(store_master_df):
+            if selected_req_index != "":
+                c1, c2 = st.columns(2)
+                if c1.button("✅ 승인", key=f"approve_lock_{selected_req_index}", use_container_width=True, type="primary"):
+                    lock_log_df.loc[selected_req_index, '상태'] = '승인'
+                    lock_log_df.loc[selected_req_index, '처리일시'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    lock_log_df.loc[selected_req_index, '실행관리자'] = st.session_state['user_info']['지점ID']
+                    if update_sheet_and_clear_cache(SHEET_NAMES["SETTLEMENT_LOCK_LOG"], lock_log_df):
+                        st.toast("정산 마감 요청이 승인되었습니다."); st.rerun()
+
+                if c2.button("❌ 반려", key=f"reject_lock_{selected_req_index}", use_container_width=True):
+                    lock_log_df.loc[selected_req_index, '상태'] = '반려'
+                    lock_log_df.loc[selected_req_index, '처리일시'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    lock_log_df.loc[selected_req_index, '실행관리자'] = st.session_state['user_info']['지점ID']
+                    if update_sheet_and_clear_cache(SHEET_NAMES["SETTLEMENT_LOCK_LOG"], lock_log_df):
+                        st.toast("정산 마감 요청이 반려되었습니다."); st.rerun()
+
+    with tab2:
+        pending_personnel = personnel_request_log_df[personnel_request_log_df['상태'] == '요청'].copy()
+        if pending_personnel.empty:
+            st.info("처리 대기 중인 인사 요청이 없습니다.")
+        else:
+            st.dataframe(pending_personnel, use_container_width=True, hide_index=True)
+            selected_req_index_p = st.selectbox("처리할 요청 선택 (선택)", options=[""] + pending_personnel.index.tolist(), format_func=lambda x: f"{pending_personnel.loc[x, '요청일시']} / {pending_personnel.loc[x, '요청지점']} / {pending_personnel.loc[x, '요청직원']}" if x != "" else "선택하세요")
+
+            if selected_req_index_p != "":
+                c1, c2 = st.columns(2)
+                request_details = pending_personnel.loc[selected_req_index_p]
+                
+                if c1.button("✅ 승인", key=f"approve_personnel_{selected_req_index_p}", use_container_width=True, type="primary"):
+                    # 인사 요청 승인 로직
+                    pass # (이 부분은 복잡하므로 별도 구현 필요)
+                
+                if c2.button("❌ 반려", key=f"reject_personnel_{selected_req_index_p}", use_container_width=True):
+                    personnel_request_log_df.loc[selected_req_index_p, '상태'] = '반려'
+                    if update_sheet_and_clear_cache(SHEET_NAMES["PERSONNEL_REQUEST_LOG"], personnel_request_log_df):
+                        st.toast("인사 요청이 반려되었습니다."); st.rerun()
+
+def render_admin_settings(store_master_df, lock_log_df):
     st.subheader("⚙️ 시스템 관리")
-    # (이전 답변과 동일한 로직, 마감 버튼 없음)
-    pass
+    
+    with st.expander("🔒 **월별 정산 수동 마감** (요청 없이 즉시 마감)"):
+        st.info("특정 월의 근무 또는 재고 정산을 관리자가 직접 마감 처리합니다. 마감된 데이터는 지점 관리자가 수정할 수 없게 됩니다.")
+        c1, c2, c3 = st.columns(3)
+        lock_store = c1.selectbox("마감할 지점 선택", options=store_master_df[store_master_df['역할'] != 'admin']['지점명'].unique())
+        lock_month = c2.selectbox("마감할 년/월 선택", options=[(date.today() - relativedelta(months=i)).strftime('%Y-%m') for i in range(12)])
+        lock_type = c3.selectbox("마감 유형", ["근무", "재고"])
+        
+        if st.button(f"'{lock_store}' {lock_month} {lock_type} 정산 마감하기", type="primary"):
+            new_lock = pd.DataFrame([{"마감년월": lock_month, "지점명": lock_store, "마감유형": lock_type, "상태": "승인", "요청일시": "", "처리일시": datetime.now().strftime('%Y-%m-%d %H:%M:%S'), "실행관리자": st.session_state['user_info']['지점ID']}])
+            if append_rows_and_clear_cache(SHEET_NAMES["SETTLEMENT_LOCK_LOG"], new_lock):
+                st.toast(f"✅ {lock_store}의 {lock_month} {lock_type} 정산이 마감 처리되었습니다."); st.rerun()
+
+    st.markdown("---")
+    st.markdown("##### 👥 **지점 계정 관리**")
+    if store_master_df.empty:
+        st.error("지점 마스터 시트를 불러올 수 없습니다."); return
+    st.info("지점 정보를 수정하거나 새 지점을 추가한 후 '계정 정보 저장' 버튼을 누르세요.")
+    edited_stores_df = st.data_editor(store_master_df, num_rows="dynamic", use_container_width=True, key="admin_settings_editor")
+    if st.button("💾 계정 정보 저장", use_container_width=True):
+        if update_sheet_and_clear_cache(SHEET_NAMES["STORE_MASTER"], edited_stores_df):
+            st.toast("✅ 지점 계정 정보가 저장되었습니다."); st.rerun()
 
 # =============================================================================
 # 5. 메인 실행 로직 (수정)
@@ -798,4 +885,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
