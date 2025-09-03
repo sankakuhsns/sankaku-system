@@ -7,6 +7,8 @@ from dateutil.relativedelta import relativedelta
 import re
 import holidays
 import io
+import random
+import string
 
 # =============================================================================
 # 0. 기본 설정 및 상수 정의
@@ -17,7 +19,8 @@ SHEET_NAMES = {
     "STORE_MASTER": "지점마스터", "EMPLOYEE_MASTER": "직원마스터",
     "ATTENDANCE_DETAIL": "근무기록_상세", "INVENTORY_LOG": "월말재고_로그",
     "INVENTORY_MASTER": "재고마스터", "INVENTORY_DETAIL_LOG": "월말재고_상세로그",
-    "SALES_LOG": "매출_로그", "SETTLEMENT_LOG": "일일정산_로그"
+    "SALES_LOG": "매출_로그", "SETTLEMENT_LOG": "일일정산_로그",
+    "PERSONNEL_TRANSFER_LOG": "인사이동_로그"
 }
 
 # =============================================================================
@@ -349,10 +352,9 @@ def render_store_inventory_check(user_info, inventory_master_df, inventory_log_d
     selected_month = st.selectbox("재고를 확인할 년/월 선택", options=options, format_func=lambda d: d.strftime('%Y년 / %m월'))
     selected_month_str = selected_month.strftime('%Y-%m')
     
-    if f"inventory_cart_{selected_month_str}" not in st.session_state:
-        st.session_state[f"inventory_cart_{selected_month_str}"] = {}
-    
     cart_key = f"inventory_cart_{selected_month_str}"
+    if cart_key not in st.session_state:
+        st.session_state[cart_key] = {}
     
     st.markdown("---")
     
@@ -466,50 +468,262 @@ def render_store_employee_info(user_info, employees_df):
                 if update_sheet_and_clear_cache(SHEET_NAMES["EMPLOYEE_MASTER"], updated_full_df):
                     st.toast("✅ 직원 정보가 성공적으로 업데이트되었습니다."); st.rerun()
 
-def render_admin_dashboard(sales_df, settlement_df):
+def render_admin_dashboard(sales_df, settlement_df, employees_df, inventory_log_df):
     st.subheader("📊 통합 대시보드")
-    if sales_df.empty:
-        st.warning("분석할 매출 데이터가 없습니다."); return
-    sales_df['월'] = pd.to_datetime(sales_df['매출일자']).dt.strftime('%Y-%m')
-    settlement_df['월'] = pd.to_datetime(settlement_df['정산일자']).dt.strftime('%Y-%m')
-    monthly_sales, monthly_expenses = sales_df.groupby('월')['금액'].sum().rename('전체 매출'), settlement_df.groupby('월')['금액'].sum().rename('총 지출')
-    summary_df = pd.concat([monthly_sales, monthly_expenses], axis=1).fillna(0).sort_index()
-    summary_df['순이익'] = summary_df['전체 매출'] - summary_df['총 지출']
-    if not summary_df.empty:
-        latest = summary_df.iloc[-1]
-        c1, c2, c3 = st.columns(3)
-        c1.metric(f"💰 전체 매출 ({latest.name})", f"₩ {latest['전체 매출']:,.0f}")
-        c2.metric(f"💸 총 지출 ({latest.name})", f"₩ {latest['총 지출']:,.0f}")
-        c3.metric(f"📈 순이익 ({latest.name})", f"₩ {latest['순이익']:,.0f}")
-        st.markdown("---"); st.write("📈 **월별 손익 추이**"); st.line_chart(summary_df)
-    else:
-        st.info("요약할 데이터가 없습니다.")
+    
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("👨‍👩‍👧‍👦 전체 직원 수", f"{len(employees_df[employees_df['재직상태'] == '재직중']):,} 명")
+    
+    if not inventory_log_df.empty:
+        latest_month = inventory_log_df['평가년월'].max()
+        latest_inv_total = inventory_log_df[inventory_log_df['평가년월'] == latest_month]['재고평가액'].sum()
+        c2.metric(f"📦 전 지점 재고 자산 ({latest_month})", f"₩ {latest_inv_total:,.0f}")
 
-def render_admin_employee_management(employees_df):
-    st.subheader("🗂️ 전 직원 관리")
+    if not sales_df.empty:
+        sales_df['매출일자'] = pd.to_datetime(sales_df['매출일자'])
+        this_month_str = datetime.now().strftime('%Y-%m')
+        this_month_sales = sales_df[sales_df['매출일자'].dt.strftime('%Y-%m') == this_month_str]['금액'].sum()
+        c3.metric(f"💰 금월 전체 매출 ({this_month_str})", f"₩ {this_month_sales:,.0f}")
+
+        best_store = sales_df[sales_df['매출일자'].dt.strftime('%Y-%m') == this_month_str].groupby('지점명')['금액'].sum().idxmax()
+        c4.metric("🏆 금월 최고 매출 지점", best_store)
+        
+        st.markdown("---")
+        st.write("📈 **월별 손익 추이**")
+        sales_df['월'] = sales_df['매출일자'].dt.strftime('%Y-%m')
+        settlement_df['월'] = pd.to_datetime(settlement_df['정산일자']).dt.strftime('%Y-%m')
+        monthly_sales = sales_df.groupby('월')['금액'].sum().rename('전체 매출')
+        monthly_expenses = settlement_df.groupby('월')['금액'].sum().rename('총 지출')
+        summary_df = pd.concat([monthly_sales, monthly_expenses], axis=1).fillna(0).sort_index()
+        summary_df['순이익'] = summary_df['전체 매출'] - summary_df['총 지출']
+        st.line_chart(summary_df)
+
+# =============================================================================
+# 4-1. 관리자 페이지 기능: 정산 관리
+# =============================================================================
+def render_admin_settlement(sales_df, settlement_df, stores_df):
+    st.subheader("🧾 정산 관리")
+    st.info("엑셀 파일로 매출을 일괄 업로드하거나, 개별 지출 내역을 수기로 입력할 수 있습니다.")
+
+    c1, c2 = st.columns(2)
+    
+    # --- 좌측: 매출 정보 입력 (파일 업로드) ---
+    with c1:
+        with st.container(border=True):
+            st.markdown("##### 📂 매출 정보 입력 (파일 업로드)")
+            
+            # 엑셀 템플릿 생성 및 다운로드
+            template_df = pd.DataFrame([{"매출일자": "2025-09-01", "지점명": "전대점", "매출유형": "카드매출", "금액": 100000, "요일": "월"}])
+            output = io.BytesIO()
+            template_df.to_excel(output, index=False, sheet_name='매출 업로드 양식')
+            st.download_button("📥 엑셀 양식 다운로드", data=output.getvalue(), file_name="매출_업로드_양식.xlsx")
+
+            uploaded_file = st.file_uploader("매출 엑셀 파일 업로드", type=["xlsx"])
+            if uploaded_file:
+                try:
+                    upload_df = pd.read_excel(uploaded_file).astype(str)
+                    st.dataframe(upload_df, use_container_width=True)
+
+                    if st.button("⬆️ 업로드 데이터 저장하기", type="primary"):
+                        # 데이터 유효성 검사 (예시)
+                        required_cols = ["매출일자", "지점명", "매출유형", "금액", "요일"]
+                        if not all(col in upload_df.columns for col in required_cols):
+                            st.error("엑셀 파일의 컬럼이 양식과 다릅니다. 양식을 확인해주세요.")
+                        else:
+                            # 중복 데이터 검사 (지점명과 매출일자 기준)
+                            existing_sales = sales_df[['지점명', '매출일자']].astype(str)
+                            upload_df_check = upload_df[['지점명', '매출일자']].astype(str)
+                            merged = upload_df_check.merge(existing_sales, on=['지점명', '매출일자'], how='inner')
+                            
+                            if not merged.empty:
+                                st.error(f"중복된 데이터가 존재합니다. ({len(merged)}건) 중복된 날짜의 데이터를 먼저 삭제 후 업로드해주세요.")
+                            else:
+                                if append_rows_and_clear_cache(SHEET_NAMES["SALES_LOG"], upload_df):
+                                    st.toast(f"✅ 매출 데이터 {len(upload_df)}건이 성공적으로 저장되었습니다."); st.rerun()
+
+                except Exception as e:
+                    st.error(f"파일을 읽는 중 오류가 발생했습니다: {e}")
+
+    # --- 우측: 지출 정보 입력 (수기) ---
+    with c2:
+        with st.container(border=True):
+            st.markdown("##### ✍️ 지출 정보 입력 (수기)")
+            with st.form("expense_form", clear_on_submit=True):
+                exp_store = st.selectbox("지점 선택", options=stores_df['지점명'].unique())
+                exp_date = st.date_input("정산일자")
+                exp_cat_large = st.selectbox("대분류", ["식자재", "판관비", "기타"])
+                exp_cat_medium = st.text_input("중분류", placeholder="예: 육류, 채소, 공과금")
+                exp_detail = st.text_input("상세내용", placeholder="예: 삼겹살 10kg 구매")
+                exp_amount = st.number_input("금액", min_value=0, step=1000)
+                
+                if st.form_submit_button("➕ 지출 내역 추가", use_container_width=True):
+                    new_expense = pd.DataFrame([{
+                        "입력일시": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                        "정산일자": exp_date.strftime('%Y-%m-%d'),
+                        "지점명": exp_store, "대분류": exp_cat_large, "중분류": exp_cat_medium,
+                        "상세내용": exp_detail, "금액": exp_amount, "입력자": st.session_state['user_info']['지점ID']
+                    }])
+                    if append_rows_and_clear_cache(SHEET_NAMES["SETTLEMENT_LOG"], new_expense):
+                        st.toast("✅ 지출 내역이 성공적으로 추가되었습니다."); st.rerun()
+
+# =============================================================================
+# 4-2. 관리자 페이지 기능: 지점 분석
+# =============================================================================
+def render_admin_analysis(sales_df, settlement_df, inventory_log_df, employees_df):
+    st.subheader("📈 지점 분석")
+    
+    all_stores = sales_df['지점명'].unique().tolist()
+    if not all_stores:
+        st.info("분석할 데이터가 없습니다."); return
+        
+    selected_store = st.selectbox("분석할 지점 선택", options=["전체"] + all_stores)
+    
+    # 데이터 필터링
+    if selected_store != "전체":
+        sales_df = sales_df[sales_df['지점명'] == selected_store]
+        settlement_df = settlement_df[settlement_df['지점명'] == selected_store]
+        inventory_log_df = inventory_log_df[inventory_log_df['지점명'] == selected_store]
+        employees_df = employees_df[employees_df['소속지점'] == selected_store]
+
+    if sales_df.empty:
+        st.warning(f"'{selected_store}'에 대한 데이터가 없습니다."); return
+        
+    # 월별 데이터 가공
+    sales_df['월'] = pd.to_datetime(sales_df['매출일자']).dt.to_period('M')
+    settlement_df['월'] = pd.to_datetime(settlement_df['정산일자']).dt.to_period('M')
+    inventory_log_df['월'] = pd.to_datetime(inventory_log_df['평가년월']).dt.to_period('M')
+
+    monthly_sales = sales_df.groupby('월')['금액'].sum()
+    monthly_expenses = settlement_df.groupby('월').pivot_table(index='월', columns='대분류', values='금액', aggfunc='sum').fillna(0)
+    monthly_inventory = inventory_log_df.set_index('월')['재고평가액']
+
+    # P&L 계산
+    analysis_df = pd.DataFrame(monthly_sales).rename(columns={'금액': '매출'})
+    analysis_df = analysis_df.join(monthly_expenses)
+    analysis_df['기말재고'] = monthly_inventory
+    analysis_df['기초재고'] = monthly_inventory.shift(1).fillna(0)
+    analysis_df['매출원가'] = analysis_df['기초재고'] + analysis_df.get('식자재', 0) - analysis_df['기말재고']
+    analysis_df['매출총이익'] = analysis_df['매출'] - analysis_df['매출원가']
+    analysis_df['영업이익'] = analysis_df['매출총이익'] - analysis_df.get('판관비', 0) - analysis_df.get('기타', 0)
+    
+    st.markdown("#### **📊 월별 손익(P&L) 추이**")
+    st.line_chart(analysis_df[['매출', '매출총이익', '영업이익']])
+    
+    st.markdown("#### **💰 비용 구조 분석 (최근 월)**")
+    latest_month_expenses = monthly_expenses.iloc[-1]
+    if not latest_month_expenses.empty:
+        st.bar_chart(latest_month_expenses)
+
+# =============================================================================
+# 4-3. 관리자 페이지 기능: 전 직원 관리
+# =============================================================================
+def render_admin_employee_management(employees_df, transfer_log_df, stores_df):
+    st.subheader("👨‍💼 전 직원 관리")
+    
+    with st.expander("🚚 직원 지점 이동"):
+        c1, c2, c3 = st.columns(3)
+        emp_to_move = c1.selectbox("이동 직원", options=employees_df['이름'].unique(), key="emp_move")
+        current_store = employees_df[employees_df['이름'] == emp_to_move]['소속지점'].iloc[0]
+        
+        target_stores = stores_df[stores_df['지점명'] != current_store]['지점명'].unique().tolist()
+        target_store = c2.selectbox("이동할 지점", options=target_stores, key="target_store")
+        
+        transfer_date = c3.date_input("이동 기준일", date.today())
+        
+        if st.button("🚀 지점 이동 적용하기", type="primary"):
+            emp_id = employees_df[employees_df['이름'] == emp_to_move]['직원ID'].iloc[0]
+            
+            # 1. 직원마스터 업데이트
+            updated_employees = employees_df.copy()
+            updated_employees.loc[updated_employees['이름'] == emp_to_move, '소속지점'] = target_store
+            
+            # 2. 인사이동 로그 기록
+            new_log = pd.DataFrame([{
+                "이동일시": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                "직원ID": emp_id, "이름": emp_to_move, "이전지점": current_store,
+                "새지점": target_store, "실행관리자": st.session_state['user_info']['지점ID']
+            }])
+
+            # 동시 업데이트
+            if update_sheet_and_clear_cache(SHEET_NAMES["EMPLOYEE_MASTER"], updated_employees):
+                append_rows_and_clear_cache(SHEET_NAMES["PERSONNEL_TRANSFER_LOG"], new_log)
+                st.toast(f"✅ {emp_to_move} 직원이 {target_store}으로 이동처리되었습니다."); st.rerun()
+
+    st.markdown("---")
+    st.markdown("##### **📝 전체 직원 목록**")
     if employees_df.empty:
         st.warning("등록된 직원이 없습니다."); return
+        
     stores = ['전체 지점'] + sorted(employees_df['소속지점'].unique().tolist())
     selected_store = st.selectbox("지점 선택", stores)
     display_df = employees_df if selected_store == '전체 지점' else employees_df[employees_df['소속지점'] == selected_store]
-    st.markdown(f"**{selected_store}** 직원 목록")
-    edited_subset_df = st.data_editor(display_df, hide_index=True, use_container_width=True, key="admin_emp_editor", disabled=["직원ID"])
-    if st.button("직원 정보 저장", use_container_width=True, type="primary"):
-        final_df = edited_subset_df if selected_store == '전체 지점' else pd.concat([employees_df[employees_df['소속지점'] != selected_store], edited_subset_df], ignore_index=True)
+    
+    edited_df = st.data_editor(display_df, hide_index=True, use_container_width=True, key="admin_emp_editor", disabled=["직원ID"],
+        column_config={"재직상태": st.column_config.SelectboxColumn("재직상태", options=["재직중", "퇴사"], required=True)})
+    
+    if st.button("💾 전체 직원 정보 저장", use_container_width=True):
+        final_df = edited_df if selected_store == '전체 지점' else pd.concat([employees_df[employees_df['소속지점'] != selected_store], edited_df], ignore_index=True)
         if update_sheet_and_clear_cache(SHEET_NAMES["EMPLOYEE_MASTER"], final_df):
-            st.success("전체 직원 정보가 업데이트되었습니다."); st.rerun()
+            st.toast("✅ 전체 직원 정보가 업데이트되었습니다."); st.rerun()
 
+# =============================================================================
+# 4-4. 관리자 페이지 기능: 재고 관리
+# =============================================================================
+def render_admin_inventory(inventory_master_df, inventory_detail_log_df):
+    st.subheader("📦 재고 관리")
+    
+    tab1, tab2 = st.tabs(["지점별 재고 조회", "재고마스터 관리"])
+    
+    with tab1:
+        st.markdown("##### **지점별 월말 재고 상세 조회**")
+        if inventory_detail_log_df.empty:
+            st.info("조회할 재고 로그 데이터가 없습니다."); return
+            
+        c1, c2 = st.columns(2)
+        store_options = inventory_detail_log_df['지점명'].unique().tolist()
+        month_options = sorted(inventory_detail_log_df['평가년월'].unique().tolist(), reverse=True)
+        
+        selected_store = c1.selectbox("지점 선택", options=store_options, key="inv_store_select")
+        selected_month = c2.selectbox("년/월 선택", options=month_options, key="inv_month_select")
+        
+        filtered_log = inventory_detail_log_df[
+            (inventory_detail_log_df['지점명'] == selected_store) &
+            (inventory_detail_log_df['평가년월'] == selected_month)
+        ]
+        
+        st.dataframe(filtered_log, use_container_width=True, hide_index=True)
+        
+        if not filtered_log.empty and '종류' in filtered_log.columns:
+            st.markdown("###### **종류별 재고 금액**")
+            category_summary = filtered_log.groupby('종류')['소계'].sum()
+            st.bar_chart(category_summary)
+
+    with tab2:
+        st.markdown("##### **재고마스터 품목 관리**")
+        st.info("이곳에서 품목을 추가, 수정, 삭제하면 모든 지점의 '월말 재고확인' 화면에 즉시 반영됩니다.")
+        
+        edited_master = st.data_editor(inventory_master_df, num_rows="dynamic", use_container_width=True, key="master_inv_editor")
+        
+        if st.button("💾 재고마스터 저장", type="primary", use_container_width=True):
+            if update_sheet_and_clear_cache(SHEET_NAMES["INVENTORY_MASTER"], edited_master):
+                st.toast("✅ 재고마스터가 성공적으로 업데이트되었습니다."); st.rerun()
+
+# =============================================================================
+# 4-5. 관리자 페이지 기능: 계정 관리
+# =============================================================================
 def render_admin_settings(store_master_df):
-    st.subheader("⚙️ 데이터 및 설정")
-    st.write("👥 **지점 계정 관리**")
+    st.subheader("⚙️ 계정 관리")
+    st.info("지점 계정 정보를 수정하거나 새 지점을 추가할 수 있습니다.")
+    
     if store_master_df.empty:
         st.error("지점 마스터 시트를 불러올 수 없습니다."); return
-    st.info("지점 정보를 수정하거나 새 지점을 추가한 후 '계정 정보 저장' 버튼을 누르세요.")
+        
     edited_stores_df = st.data_editor(store_master_df, num_rows="dynamic", use_container_width=True, key="admin_settings_editor")
-    if st.button("지점 계정 정보 저장", use_container_width=True):
+    
+    if st.button("💾 계정 정보 저장", use_container_width=True, type="primary"):
         if update_sheet_and_clear_cache(SHEET_NAMES["STORE_MASTER"], edited_stores_df):
-            st.success("지점 계정 정보가 저장되었습니다."); st.rerun()
-            
+            st.toast("✅ 지점 계정 정보가 저장되었습니다."); st.rerun()
+
 # =============================================================================
 # 5. 메인 실행 로직
 # =============================================================================
@@ -521,14 +735,7 @@ def main():
         if 'data_cache' not in st.session_state or not st.session_state['data_cache']:
             with st.spinner("데이터를 불러오는 중입니다..."):
                 st.session_state['data_cache'] = {
-                    "employees": load_data(SHEET_NAMES["EMPLOYEE_MASTER"]),
-                    "attendance": load_data(SHEET_NAMES["ATTENDANCE_DETAIL"]),
-                    "inventory": load_data(SHEET_NAMES["INVENTORY_LOG"]),
-                    "inventory_master": load_data(SHEET_NAMES["INVENTORY_MASTER"]),
-                    "inventory_detail_log": load_data(SHEET_NAMES["INVENTORY_DETAIL_LOG"]),
-                    "stores": load_data(SHEET_NAMES["STORE_MASTER"]),
-                    "sales": load_data(SHEET_NAMES["SALES_LOG"]),
-                    "settlement": load_data(SHEET_NAMES["SETTLEMENT_LOG"]),
+                    name: load_data(sheet) for name, sheet in SHEET_NAMES.items()
                 }
         
         cache = st.session_state['data_cache']
@@ -536,26 +743,31 @@ def main():
         role, name = user_info.get('역할', 'store'), user_info.get('지점명', '사용자')
         st.sidebar.success(f"**{name}** ({role})님, 환영합니다.")
         st.sidebar.markdown("---")
-        if role != 'admin':
-            check_health_cert_expiration(user_info, cache['employees'])
+        
+        if role == 'admin' or (role == 'store' and not cache['employees'].empty):
+            check_health_cert_expiration(user_info, cache['EMPLOYEE_MASTER'])
+
         if st.sidebar.button("로그아웃"):
             st.session_state.clear(); st.rerun()
         
         if role == 'admin':
             st.title("👑 관리자 페이지")
-            admin_tabs = st.tabs(["📊 통합 대시보드", "🗂️ 전 직원 관리", "⚙️ 데이터 및 설정"])
-            with admin_tabs[0]: render_admin_dashboard(cache['sales'], cache['settlement'])
-            with admin_tabs[1]: render_admin_employee_management(cache['employees'])
-            with admin_tabs[2]: render_admin_settings(cache['stores'])
-        else:
+            admin_tabs = st.tabs(["📊 통합 대시보드", "🧾 정산 관리", "📈 지점 분석", "👨‍💼 전 직원 관리", "📦 재고 관리", "⚙️ 계정 관리"])
+            with admin_tabs[0]: render_admin_dashboard(cache['SALES_LOG'], cache['SETTLEMENT_LOG'], cache['EMPLOYEE_MASTER'], cache['INVENTORY_LOG'])
+            with admin_tabs[1]: render_admin_settlement(cache['SALES_LOG'], cache['SETTLEMENT_LOG'], cache['STORE_MASTER'])
+            with admin_tabs[2]: render_admin_analysis(cache['SALES_LOG'], cache['SETTLEMENT_LOG'], cache['INVENTORY_LOG'], cache['EMPLOYEE_MASTER'])
+            with admin_tabs[3]: render_admin_employee_management(cache['EMPLOYEE_MASTER'], cache['PERSONNEL_TRANSFER_LOG'], cache['STORE_MASTER'])
+            with admin_tabs[4]: render_admin_inventory(cache['INVENTORY_MASTER'], cache['INVENTORY_DETAIL_LOG'])
+            with admin_tabs[5]: render_admin_settings(cache['STORE_MASTER'])
+        else: # role == 'store'
             st.title(f"🏢 {name} 지점 관리 시스템")
             store_tabs = st.tabs(["⏰ 월별 근무기록", "📦 월말 재고확인", "👥 직원 정보"])
             with store_tabs[0]:
-                render_store_attendance(user_info, cache['employees'], cache['attendance'])
+                render_store_attendance(user_info, cache['EMPLOYEE_MASTER'], cache['ATTENDANCE_DETAIL'])
             with store_tabs[1]:
-                render_store_inventory_check(user_info, cache['inventory_master'], cache['inventory'], cache['inventory_detail_log'])
+                render_store_inventory_check(user_info, cache['INVENTORY_MASTER'], cache['INVENTORY_LOG'], cache['INVENTORY_DETAIL_LOG'])
             with store_tabs[2]:
-                render_store_employee_info(user_info, cache['employees'])
+                render_store_employee_info(user_info, cache['EMPLOYEE_MASTER'])
 
 if __name__ == "__main__":
     main()
