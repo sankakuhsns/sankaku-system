@@ -200,32 +200,38 @@ def render_store_attendance(user_info, employees_df, attendance_detail_df, lock_
         """)
     store_name = user_info['지점명']
     
-    # 파견 직원 정보 통합
-    now_str = datetime.now().strftime('%Y-%m-%d')
-    dispatched_to_here = dispatch_log_df[
-        (dispatch_log_df['파견지점'] == store_name) &
-        (dispatch_log_df['파견시작일'] <= now_str) &
-        (dispatch_log_df['파견종료일'] >= now_str)
-    ]
+    # --- BUGFIX: dispatch_log_df가 비어있거나 컬럼이 없는 경우를 대비한 방어 로직 ---
+    dispatched_to_here = pd.DataFrame()
+    required_dispatch_cols = ['파견지점', '파견시작일', '파견종료일', '직원ID']
+    if not dispatch_log_df.empty and all(col in dispatch_log_df.columns for col in required_dispatch_cols):
+        now_str = datetime.now().strftime('%Y-%m-%d')
+        dispatched_to_here = dispatch_log_df[
+            (dispatch_log_df['파견지점'] == store_name) &
+            (dispatch_log_df['파견시작일'] <= now_str) &
+            (dispatch_log_df['파견종료일'] >= now_str)
+        ]
+    
     if not dispatched_to_here.empty:
         dispatched_employees = employees_df[employees_df['직원ID'].isin(dispatched_to_here['직원ID'])]
-        store_employees_df = pd.concat([employees_df[(employees_df['소속지점'] == store_name)], dispatched_employees]).drop_duplicates(subset=['직원ID'])
+        store_employees_df = pd.concat([
+            employees_df[employees_df['소속지점'] == store_name], 
+            dispatched_employees
+        ]).drop_duplicates(subset=['직원ID'])
     else:
-        store_employees_df = employees_df[(employees_df['소속지점'] == store_name)]
+        store_employees_df = employees_df[employees_df['소속지점'] == store_name]
         
     store_employees_df = store_employees_df[store_employees_df['재직상태'] == '재직중']
     
     if store_employees_df.empty:
         st.warning("관리할 직원이 없습니다."); return
         
-    # 정산 마감된 월 확인
     locked_months = lock_log_df[
-        (lock_log_df['지점명'] == store_name) &
-        (lock_log_df['마감유형'] == '근무')
+        (lock_log_df['지점명'] == store_name) & (lock_log_df['마감유형'] == '근무')
     ]['마감년월'].tolist() if not lock_log_df.empty else []
 
     month_options = [(date.today() - relativedelta(months=i)) for i in range(4)]
     available_months = [m for m in month_options if m.strftime('%Y-%m') not in locked_months]
+    
     if not available_months:
         st.warning("조회 가능한 월이 없습니다. (모든 월이 정산 마감되었을 수 있습니다.)"); return
 
@@ -789,3 +795,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
