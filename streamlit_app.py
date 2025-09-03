@@ -26,7 +26,7 @@ SHEET_NAMES = {
 THEME = { "BORDER": "#e8e8ee", "PRIMARY": "#1C6758", "BG": "#f7f8fa", "TEXT": "#222" }
 
 # =============================================================================
-# 1. 구글 시트 연결 및 데이터 처리 함수
+# 1. 구글 시트 연결 및 데이터 처리 함수 (안정성 강화)
 # =============================================================================
 @st.cache_resource
 def get_gspread_client():
@@ -34,9 +34,16 @@ def get_gspread_client():
     creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
     return gspread.authorize(creds)
 
+def _get_sheet_key():
+    try: return st.secrets["gcp_service_account"]["SPREADSHEET_KEY"]
+    except KeyError:
+        try: return st.secrets["SPREADSHEET_KEY"]
+        except KeyError: raise RuntimeError("SPREADSHEET_KEY가 secrets에 없습니다. st.secrets['SPREADSHEET_KEY'] 또는 st.secrets['gcp_service_account']['SPREADSHEET_KEY'] 중 하나를 등록하세요.")
+
+@st.cache_data(ttl=60)
 def load_data(sheet_name):
     try:
-        spreadsheet = get_gspread_client().open_by_key(st.secrets["gcp_service_account"]["SPREADSHEET_KEY"])
+        spreadsheet = get_gspread_client().open_by_key(_get_sheet_key())
         worksheet = spreadsheet.worksheet(sheet_name)
         df = pd.DataFrame(worksheet.get_all_records())
         for col in df.select_dtypes(include=['object']).columns:
@@ -56,7 +63,7 @@ def load_data(sheet_name):
 
 def update_sheet(sheet_name, df):
     try:
-        spreadsheet = get_gspread_client().open_by_key(st.secrets["gcp_service_account"]["SPREADSHEET_KEY"])
+        spreadsheet = get_gspread_client().open_by_key(_get_sheet_key())
         worksheet = spreadsheet.worksheet(sheet_name)
         worksheet.clear()
         df_str = df.astype(str).replace('nan', '').replace('NaT', '')
@@ -67,7 +74,7 @@ def update_sheet(sheet_name, df):
 
 def append_rows(sheet_name, rows_df):
     try:
-        spreadsheet = get_gspread_client().open_by_key(st.secrets["gcp_service_account"]["SPREADSHEET_KEY"])
+        spreadsheet = get_gspread_client().open_by_key(_get_sheet_key())
         worksheet = spreadsheet.worksheet(sheet_name)
         rows_df_str = rows_df.astype(str).replace('nan', '').replace('NaT', '')
         worksheet.append_rows(rows_df_str.values.tolist(), value_input_option='USER_ENTERED', insert_data_option='INSERT_ROWS', table_range='A1')
@@ -77,29 +84,36 @@ def append_rows(sheet_name, rows_df):
 
 def update_sheet_and_clear_cache(sheet_name, df):
     if update_sheet(sheet_name, df):
-        if 'data_cache' in st.session_state: del st.session_state['data_cache']
+        st.cache_data.clear()
+        st.session_state.pop('data_cache', None)
         return True
     return False
 
 def append_rows_and_clear_cache(sheet_name, rows_df):
     if append_rows(sheet_name, rows_df):
-        if 'data_cache' in st.session_state: del st.session_state['data_cache']
+        st.cache_data.clear()
+        st.session_state.pop('data_cache', None)
         return True
     return False
 
 # =============================================================================
-# 2. 헬퍼 함수 및 기능별 로직
+# 2. 헬퍼 함수 및 기능별 로직 (개선)
 # =============================================================================
 def _format_time_input(time_input):
-    s = str(time_input).strip()
-    if ':' in s:
-        parts = s.split(':')
-        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
-            s = f"{parts[0].zfill(2)}:{parts[1].zfill(2)}"
-    elif s.isdigit():
-        if len(s) == 3: s = f"0{s[0]}:{s[1:]}"
+    s = str(time_input).strip().replace('.', ':')
+    if s.isdigit():
+        if len(s) == 1: s = f"0{s}:00"
+        elif len(s) == 2: s = f"{s}:00"
+        elif len(s) == 3: s = f"0{s[0]}:{s[1:]}"
         elif len(s) == 4: s = f"{s[:2]}:{s[2:]}"
+    elif ':' in s:
+        hh, mm = (s.split(':') + ["0"])[:2]
+        s = f"{hh.zfill(2)}:{mm.zfill(2)}"
     return s if re.match(r'^([01]\d|2[0-3]):([0-5]\d)$', s) else None
+
+def _has_overlap(group):
+    grp = group.sort_values('start_dt').reset_index(drop=True)
+    return any(grp.loc[i, 'end_dt'] > grp.loc[i+1, 'start_dt'] for i in range(len(grp)-1))
 
 def _validate_phone_number(phone):
     pattern = re.compile(r'^\d{3}-\d{4}-\d{4}$')
@@ -148,9 +162,13 @@ def check_health_cert_expiration(user_info, all_employees_df):
     required_cols = ['소속지점', '재직상태', '보건증만료일', '이름']
     if not all(col in all_employees_df.columns for col in required_cols): return
     store_name = user_info['지점명']
-    store_employees_df = all_employees_df[(all_employees_df['소속지점'] == store_name) & (all_employees_df['재직상태'] == '재직중')]
+    
+    mask_active = (all_employees_df['소속지점'] == store_name) & (all_employees_df['재직상태'] == '재직중')
+    df_copy = all_employees_df.copy()
+    df_copy.loc[mask_active, '보건증만료일'] = pd.to_datetime(df_copy.loc[mask_active, '보건증만료일'], errors='coerce')
+    store_employees_df = df_copy.loc[mask_active]
+
     if store_employees_df.empty: return
-    store_employees_df['보건증만료일'] = pd.to_datetime(store_employees_df['보건증만료일'], errors='coerce')
     today = datetime.now()
     expiring_soon_list = [f"- **{row['이름']}**: {row['보건증만료일'].strftime('%Y-%m-%d')} 만료" for _, row in store_employees_df.iterrows() if pd.notna(row['보건증만료일']) and today <= row['보건증만료일'] < (today + timedelta(days=30))]
     if expiring_soon_list:
@@ -234,12 +252,14 @@ def render_store_attendance(user_info, employees_df, attendance_detail_df, lock_
 
     selected_month_date = st.selectbox("관리할 년/월 선택", options=available_months, format_func=lambda d: d.strftime('%Y년 / %m월'))
     
-    # --- AttributeError BUGFIX: 불필요한 .date() 호출 제거 ---
+    if selected_month_date is None:
+        st.warning("선택할 수 있는 월이 없습니다."); return
+        
+    selected_month_str = selected_month_date.strftime('%Y-%m')
     start_date, end_date = selected_month_date, (selected_month_date + relativedelta(months=1)) - timedelta(days=1)
-    selected_month_str = start_date.strftime('%Y-%m')
-
+    
     lock_status = "미요청"
-    if not locked_months_df.empty and '마감년월' in locked_months_df.columns:
+    if not locked_months_df.empty and '마감년월' in locked_months_df.columns and '상태' in locked_months_df.columns:
         current_month_lock = locked_months_df[locked_months_df['마감년월'] == selected_month_str]
         if not current_month_lock.empty:
             lock_status = current_month_lock.iloc[0]['상태']
@@ -414,7 +434,6 @@ def render_store_inventory_check(user_info, inventory_master_df, inventory_log_d
         (lock_log_df['지점명'] == store_name) & (lock_log_df['마감유형'] == '재고')
     ] if not lock_log_df.empty and '지점명' in lock_log_df.columns and '마감유형' in lock_log_df.columns else pd.DataFrame(columns=['마감년월', '상태'])
     
-    # --- AttributeError BUGFIX: 불필요한 .date() 호출 제거 ---
     month_options = [(date.today() - relativedelta(months=i)).replace(day=1) for i in range(4)]
     available_months = [m for m in month_options if m.strftime('%Y-%m') not in locked_months_df.get('마감년월', pd.Series(dtype=str)).tolist()]
     
@@ -484,7 +503,7 @@ def render_store_inventory_check(user_info, inventory_master_df, inventory_log_d
 
                 cart_df_final = cart_df.copy()
                 cart_df_final['평가년월'] = selected_month_str; cart_df_final['지점명'] = store_name
-                cart_df_final = cart_df_final[['평가년월', '지점명', '품목명', '단위', '단가', '수량', '소계']]
+                cart_df_final = cart_df_final[['평가년월', '지점명', '품목명', '종류', '단위', '단가', '수량', '소계']]
                 append_success = append_rows_and_clear_cache(SHEET_NAMES["INVENTORY_DETAIL_LOG"], cart_df_final)
                 
                 if update_success and append_success:
@@ -529,8 +548,12 @@ def render_store_employee_info(user_info, employees_df, personnel_request_log_df
     st.markdown("---"); st.markdown("##### **우리 지점 직원 목록**")
     store_employees_df = employees_df[employees_df['소속지점'] == store_name].copy()
     if not store_employees_df.empty:
-        edited_df = st.data_editor(store_employees_df, key="employee_editor", use_container_width=True, disabled=["직원ID", "소속지점"],
-            column_config={"재직상태": st.column_config.SelectboxColumn("재직상태", options=["재직중", "퇴사"], required=True)})
+        edited_df = st.data_editor(store_employees_df, key="employee_editor", use_container_width=True,
+            column_config={
+                "직원ID": st.column_config.TextColumn("직원ID", disabled=True),
+                "소속지점": st.column_config.TextColumn("소속지점", disabled=True),
+                "재직상태": st.column_config.SelectboxColumn("재직상태", options=["재직중", "퇴사"], required=True),
+            })
         if st.button("💾 변경사항 저장", type="primary", use_container_width=True):
             error_found = False
             for index, row in edited_df.iterrows():
@@ -578,8 +601,14 @@ def render_admin_dashboard(sales_df, settlement_df, employees_df, inventory_log_
         this_month_str = datetime.now().strftime('%Y-%m')
         this_month_sales = sales_df[sales_df['매출일자'].dt.strftime('%Y-%m') == this_month_str]['금액'].sum()
         c3.metric(f"💰 금월 전체 매출 ({this_month_str})", f"₩ {this_month_sales:,.0f}")
-        best_store = sales_df[sales_df['매출일자'].dt.strftime('%Y-%m') == this_month_str].groupby('지점명')['금액'].sum().idxmax()
-        c4.metric("🏆 금월 최고 매출 지점", best_store)
+        
+        this_month_df = sales_df[sales_df['매출일자'].dt.strftime('%Y-%m') == this_month_str]
+        if not this_month_df.empty:
+            best_store = this_month_df.groupby('지점명')['금액'].sum().idxmax()
+            c4.metric("🏆 금월 최고 매출 지점", best_store)
+        else:
+            c4.metric("🏆 금월 최고 매출 지점", "데이터 없음")
+            
         st.markdown("---")
         st.write("📈 **월별 손익 추이**")
         sales_df['월'] = sales_df['매출일자'].dt.strftime('%Y-%m')
@@ -713,7 +742,8 @@ def render_admin_employee_management(employees_df, transfer_log_df, stores_df, d
     stores = ['전체 지점'] + sorted(employees_df['소속지점'].unique().tolist())
     selected_store = st.selectbox("지점 선택", stores)
     display_df = employees_df if selected_store == '전체 지점' else employees_df[employees_df['소속지점'] == selected_store]
-    edited_df = st.data_editor(display_df, hide_index=True, use_container_width=True, key="admin_emp_editor", disabled=["직원ID"])
+    edited_df = st.data_editor(display_df, hide_index=True, use_container_width=True, key="admin_emp_editor", 
+        column_config={"직원ID": st.column_config.TextColumn(disabled=True)})
     if st.button("💾 전체 직원 정보 저장", use_container_width=True):
         final_df = edited_df if selected_store == '전체 지점' else pd.concat([employees_df[employees_df['소속지점'] != selected_store], edited_df], ignore_index=True)
         if update_sheet_and_clear_cache(SHEET_NAMES["EMPLOYEE_MASTER"], final_df):
@@ -761,7 +791,15 @@ def render_admin_approval(lock_log_df, personnel_request_log_df, employees_df, s
         else:
             st.dataframe(pending_locks, use_container_width=True, hide_index=True)
             
-            selected_req_index = st.selectbox("처리할 요청 선택 (선택)", options=[""] + pending_locks.index.tolist(), format_func=lambda x: f"{pending_locks.loc[x, '마감년월']} / {pending_locks.loc[x, '지점명']} / {pending_locks.loc[x, '마감유형']}" if x != "" else "선택하세요")
+            # Format func now handles the case where index might not exist
+            def format_lock_req(x):
+                if x == "": return "선택하세요"
+                try:
+                    return f"{pending_locks.loc[x, '마감년월']} / {pending_locks.loc[x, '지점명']} / {pending_locks.loc[x, '마감유형']}"
+                except KeyError:
+                    return "처리할 요청 선택"
+
+            selected_req_index = st.selectbox("처리할 요청 선택 (선택)", options=[""] + pending_locks.index.tolist(), format_func=format_lock_req)
 
             if selected_req_index != "":
                 c1, c2 = st.columns(2)
@@ -785,23 +823,69 @@ def render_admin_approval(lock_log_df, personnel_request_log_df, employees_df, s
             st.info("처리 대기 중인 인사 요청이 없습니다.")
         else:
             st.dataframe(pending_personnel, use_container_width=True, hide_index=True)
-            selected_req_index_p = st.selectbox("처리할 요청 선택 (선택)", options=[""] + pending_personnel.index.tolist(), format_func=lambda x: f"{pending_personnel.loc[x, '요청일시']} / {pending_personnel.loc[x, '요청지점']} / {pending_personnel.loc[x, '요청직원']}" if x != "" else "선택하세요")
+            
+            def format_personnel_req(x):
+                if x == "": return "선택하세요"
+                try:
+                    return f"{pending_personnel.loc[x, '요청일시']} / {pending_personnel.loc[x, '요청지점']} / {pending_personnel.loc[x, '요청직원']}"
+                except KeyError:
+                    return "처리할 요청 선택"
+                    
+            selected_req_index_p = st.selectbox("처리할 요청 선택 (선택)", options=[""] + pending_personnel.index.tolist(), format_func=format_personnel_req)
 
             if selected_req_index_p != "":
                 c1, c2 = st.columns(2)
                 request_details = pending_personnel.loc[selected_req_index_p]
                 
                 if c1.button("✅ 승인", key=f"approve_personnel_{selected_req_index_p}", use_container_width=True, type="primary"):
-                    # 인사 요청 승인 로직
-                    pass
-                
+                    success = False
+                    req_type = request_details['요청유형']
+                    emp_name = request_details['요청직원']
+                    detail_text = request_details['상세내용']
+                    
+                    emp_info = employees_df[employees_df['이름'] == emp_name]
+                    if emp_info.empty:
+                        st.error(f"직원 '{emp_name}'의 정보를 찾을 수 없습니다.")
+                    else:
+                        emp_id = emp_info.iloc[0]['직원ID']
+                        current_store = emp_info.iloc[0]['소속지점']
+                        admin_id = st.session_state['user_info']['지점ID']
+
+                        if req_type == '지점 이동':
+                            target_store = detail_text.split('으로')[0]
+                            updated_employees = employees_df.copy()
+                            updated_employees.loc[updated_employees['이름'] == emp_name, '소속지점'] = target_store
+                            new_log = pd.DataFrame([{"이동일시": datetime.now().strftime('%Y-%m-%d %H:%M:%S'), "직원ID": emp_id, "이름": emp_name, "이전지점": current_store, "새지점": target_store, "실행관리자": admin_id}])
+                            if update_sheet_and_clear_cache(SHEET_NAMES["EMPLOYEE_MASTER"], updated_employees):
+                                append_rows_and_clear_cache(SHEET_NAMES["PERSONNEL_TRANSFER_LOG"], new_log)
+                                success = True
+
+                        elif req_type == '파견':
+                            parts = detail_text.split(' ')
+                            target_store = parts[0].replace('으로', '')
+                            start_date = parts[1]
+                            end_date = parts[3]
+                            new_dispatch = pd.DataFrame([{"직원ID": emp_id, "이름": emp_name, "원소속": current_store, "파견지점": target_store, "파견시작일": start_date, "파견종료일": end_date, "실행관리자": admin_id}])
+                            if append_rows_and_clear_cache(SHEET_NAMES["DISPATCH_LOG"], new_dispatch):
+                                success = True
+                        
+                        if success:
+                            personnel_request_log_df.loc[selected_req_index_p, '상태'] = '승인'
+                            personnel_request_log_df.loc[selected_req_index_p, '처리일시'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                            personnel_request_log_df.loc[selected_req_index_p, '처리관리자'] = admin_id
+                            if update_sheet_and_clear_cache(SHEET_NAMES["PERSONNEL_REQUEST_LOG"], personnel_request_log_df):
+                                st.toast(f"✅ {emp_name} 직원의 {req_type} 요청이 승인되었습니다."); st.rerun()
+
                 if c2.button("❌ 반려", key=f"reject_personnel_{selected_req_index_p}", use_container_width=True):
                     personnel_request_log_df.loc[selected_req_index_p, '상태'] = '반려'
+                    personnel_request_log_df.loc[selected_req_index_p, '처리일시'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    personnel_request_log_df.loc[selected_req_index_p, '처리관리자'] = st.session_state['user_info']['지점ID']
                     if update_sheet_and_clear_cache(SHEET_NAMES["PERSONNEL_REQUEST_LOG"], personnel_request_log_df):
                         st.toast("인사 요청이 반려되었습니다."); st.rerun()
 
 def render_admin_settings(store_master_df, lock_log_df):
     st.subheader("⚙️ 시스템 관리")
+    
     with st.expander("🔒 **월별 정산 수동 마감** (요청 없이 즉시 마감)"):
         st.info("특정 월의 근무 또는 재고 정산을 관리자가 직접 마감 처리합니다. 마감된 데이터는 지점 관리자가 수정할 수 없게 됩니다.")
         c1, c2, c3 = st.columns(3)
@@ -850,38 +934,25 @@ def main():
         if st.sidebar.button("로그아웃"):
             st.session_state.clear(); st.rerun()
         
-        # --- UI 개선: 발주 시스템 스타일 탭 CSS 적용 ---
         st.markdown(f"""<style>
             .stTabs [data-baseweb="tab-list"] {{ gap: 12px; }}
-            .stTabs [data-baseweb="tab"] {{ 
-                height: 42px; 
-                border: 1px solid {THEME['BORDER']}; 
-                border-radius: 12px; 
-                background-color: #fff; 
-                padding: 10px 14px;
-                box-shadow: 0 1px 6px rgba(0,0,0,0.04); 
-            }}
-            .stTabs [aria-selected="true"] {{ 
-                border-color: {THEME['PRIMARY']}; 
-                color: {THEME['PRIMARY']};
-                box-shadow: 0 6px 16px rgba(28,103,88,0.18); 
-                font-weight: 700; 
-            }}
-            html, body, [data-testid="stAppViewContainer"] {{ 
-                background: {THEME['BG']}; 
-            }}
-            [data-testid="stAppViewContainer"] .main .block-container {{ 
-                max-width: 1050px; 
-                margin: 0 auto;
-            }}
-            .stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"] {{ 
-                display: none; 
-            }}
+            .stTabs [data-baseweb="tab"] {{ height: 42px; border: 1px solid {THEME['BORDER']}; border-radius: 12px; background-color: #fff; padding: 10px 14px; box-shadow: 0 1px 6px rgba(0,0,0,0.04); }}
+            .stTabs [aria-selected="true"] {{ border-color: {THEME['PRIMARY']}; color: {THEME['PRIMARY']}; box-shadow: 0 6px 16px rgba(28,103,88,0.18); font-weight: 700; }}
+            html, body, [data-testid="stAppViewContainer"] {{ background: {THEME['BG']}; }}
+            [data-testid="stAppViewContainer"] .main .block-container {{ max-width: 1050px; margin: 0 auto;}}
+            .stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"] {{ display: none; }}
         </style>""", unsafe_allow_html=True)
 
         if role == 'admin':
             st.title("👑 관리자 페이지")
-            # ... (관리자 탭 렌더링) ...
+            admin_tabs = st.tabs(["📊 통합 대시보드", "🧾 정산 관리", "📈 지점 분석", "👨‍💼 전 직원 관리", "📦 재고 관리", "✅ 승인 관리", "⚙️ 시스템 관리"])
+            with admin_tabs[0]: render_admin_dashboard(cache['SALES_LOG'], cache['SETTLEMENT_LOG'], cache['EMPLOYEE_MASTER'], cache['INVENTORY_LOG'])
+            with admin_tabs[1]: render_admin_settlement(cache['SALES_LOG'], cache['SETTLEMENT_LOG'], cache['STORE_MASTER'])
+            with admin_tabs[2]: render_admin_analysis(cache['SALES_LOG'], cache['SETTLEMENT_LOG'], cache['INVENTORY_LOG'], cache['EMPLOYEE_MASTER'])
+            with admin_tabs[3]: render_admin_employee_management(cache['EMPLOYEE_MASTER'], cache['PERSONNEL_TRANSFER_LOG'], cache['STORE_MASTER'], cache['DISPATCH_LOG'])
+            with admin_tabs[4]: render_admin_inventory(cache['INVENTORY_MASTER'], cache['INVENTORY_DETAIL_LOG'])
+            with admin_tabs[5]: render_admin_approval(cache['SETTLEMENT_LOCK_LOG'], cache['PERSONNEL_REQUEST_LOG'], cache['EMPLOYEE_MASTER'], cache['STORE_MASTER'], cache['DISPATCH_LOG'])
+            with admin_tabs[6]: render_admin_settings(cache['STORE_MASTER'], cache['SETTLEMENT_LOCK_LOG'])
         else: # role == 'store'
             st.title(f"🏢 {name} 지점 관리 시스템")
             store_tabs = st.tabs(["⏰ 월별 근무기록", "📦 월말 재고확인", "👥 직원 정보"])
