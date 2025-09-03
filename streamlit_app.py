@@ -233,7 +233,7 @@ def render_store_attendance(user_info, employees_df, attendance_detail_df, lock_
     start_date, end_date = selected_month_date, (selected_month_date + relativedelta(months=1)) - timedelta(days=1)
     
     lock_status = "미요청"
-    if not locked_months_df.empty:
+    if not locked_months_df.empty and '마감년월' in locked_months_df.columns:
         current_month_lock = locked_months_df[locked_months_df['마감년월'] == selected_month_str]
         if not current_month_lock.empty:
             lock_status = current_month_lock.iloc[0]['상태']
@@ -378,6 +378,17 @@ def render_store_attendance(user_info, employees_df, attendance_detail_df, lock_
                 if update_sheet_and_clear_cache(SHEET_NAMES["ATTENDANCE_DETAIL"], final_df):
                     st.toast(f"✅ {selected_date.strftime('%m월 %d일')}의 근무 기록이 성공적으로 저장되었습니다."); st.rerun()
 
+    st.markdown("---")
+    if lock_status == "승인":
+        st.success(f"✅ {selected_month_str}의 근무 정산이 마감되었습니다. 데이터는 조회만 가능합니다.")
+    elif lock_status == "요청":
+        st.warning("🔒 현재 관리자에게 마감 요청 중입니다. 수정을 원하시면 관리자에게 요청을 반려해달라고 문의하세요.")
+    else: # 미요청
+        if st.button(f"🔒 {selected_month_str} 근무기록 마감 요청하기", use_container_width=True, type="primary"):
+            new_lock_request = pd.DataFrame([{"마감년월": selected_month_str, "지점명": store_name, "마감유형": "근무", "상태": "요청", "요청일시": datetime.now().strftime('%Y-%m-%d %H:%M:%S'), "처리일시": "", "실행관리자": ""}])
+            if append_rows_and_clear_cache(SHEET_NAMES["SETTLEMENT_LOCK_LOG"], new_lock_request):
+                st.toast("✅ 관리자에게 마감 요청을 보냈습니다."); st.rerun()
+
 def render_store_inventory_check(user_info, inventory_master_df, inventory_log_df, inventory_detail_log_df, lock_log_df):
     st.subheader("📦 월말 재고확인")
     with st.expander("💡 도움말"):
@@ -453,7 +464,7 @@ def render_store_inventory_check(user_info, inventory_master_df, inventory_log_d
             if st.button("🗑️ 장바구니 비우기", use_container_width=True):
                 st.session_state[cart_key] = {}; st.rerun()
             
-            if st.button(f"💾 {selected_month_date.strftime('%Y년 %m월')} 재고 제출", type="primary", use_container_width=True):
+            if st.button(f"🔒 {selected_month_date.strftime('%Y년 %m월')} 재고 마감 요청", type="primary", use_container_width=True):
                 if not inventory_log_df.empty and '평가년월' in inventory_log_df.columns:
                     inventory_log_df['평가년월'] = pd.to_datetime(inventory_log_df['평가년월'], errors='coerce').dt.strftime('%Y-%m')
                 existing_indices = inventory_log_df[(inventory_log_df['평가년월'] == selected_month_str) & (inventory_log_df['지점명'] == store_name)].index if not inventory_log_df.empty else pd.Index([])
@@ -579,7 +590,6 @@ def render_admin_settlement(sales_df, settlement_df, stores_df):
     
     tab1, tab2 = st.tabs(["📂 매출 정보 관리", "✍️ 지출 정보 관리"])
     with tab1:
-        # 매출 업로드
         template_df = pd.DataFrame([{"매출일자": "2025-09-01", "지점명": "전대점", "매출유형": "카드매출", "금액": 100000, "요일": "월"}])
         output = io.BytesIO()
         template_df.to_excel(output, index=False, sheet_name='매출 업로드 양식')
@@ -593,7 +603,6 @@ def render_admin_settlement(sales_df, settlement_df, stores_df):
             st.success(f"현재 **{len(sales_df)}**건의 매출 데이터가 저장되어 있습니다. (기간: {min_date} ~ {max_date})")
 
     with tab2:
-        # 지출 업로드
         template_df = pd.DataFrame([{"입력일시": "2025-09-01 15:30", "정산일자": "2025-09-01", "지점명": "전대점", "대분류": "식자재", "중분류": "육류", "상세내용": "삼겹살 10kg", "금액": 150000, "입력자": "admin"}])
         output = io.BytesIO()
         template_df.to_excel(output, index=False, sheet_name='지출 업로드 양식')
@@ -710,6 +719,20 @@ def render_admin_inventory(inventory_master_df, inventory_detail_log_df):
             if update_sheet_and_clear_cache(SHEET_NAMES["INVENTORY_MASTER"], edited_master):
                 st.toast("✅ 재고마스터가 성공적으로 업데이트되었습니다."); st.rerun()
 
+def render_admin_approval(lock_log_df, personnel_request_log_df, employees_df):
+    st.subheader("✅ 승인 관리")
+    st.info("지점에서 요청한 '정산 마감' 및 '인사 이동/파견' 건을 처리합니다.")
+    
+    tab1, tab2 = st.tabs(["정산 마감 요청", "인사 이동/파견 요청"])
+    with tab1:
+        pending_locks = lock_log_df[lock_log_df['상태'] == '요청']
+        st.dataframe(pending_locks)
+        # (마감 승인/반려 로직)
+    with tab2:
+        pending_personnel = personnel_request_log_df[personnel_request_log_df['상태'] == '요청']
+        st.dataframe(pending_personnel)
+        # (인사 승인/반려 로직)
+
 def render_admin_settings(store_master_df, lock_log_df):
     st.subheader("⚙️ 시스템 관리")
     
@@ -792,3 +815,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
