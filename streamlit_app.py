@@ -225,7 +225,7 @@ def render_store_attendance(user_info, employees_df, attendance_detail_df, lock_
         (lock_log_df['지점명'] == store_name) & (lock_log_df['마감유형'] == '근무')
     ]['마감년월'].tolist() if not lock_log_df.empty else []
 
-    month_options = [(date.today() - relativedelta(months=i)) for i in range(4)]
+    month_options = [(date.today() - relativedelta(months=i)).date().replace(day=1) for i in range(4)]
     available_months = [m for m in month_options if m.strftime('%Y-%m') not in locked_months]
     
     if not available_months:
@@ -392,7 +392,7 @@ def render_store_inventory_check(user_info, inventory_master_df, inventory_log_d
         (lock_log_df['지점명'] == store_name) & (lock_log_df['마감유형'] == '재고')
     ]['마감년월'].tolist() if not lock_log_df.empty else []
     
-    month_options = [(date.today() - relativedelta(months=i)) for i in range(4)]
+    month_options = [(date.today() - relativedelta(months=i)).date().replace(day=1) for i in range(4)]
     available_months = [m for m in month_options if m.strftime('%Y-%m') not in locked_months]
     
     if not available_months:
