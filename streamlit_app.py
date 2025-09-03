@@ -142,7 +142,7 @@ def login_screen():
 
 
 # =============================================================================
-# 4. 월별 근무기록 관리 (일괄 관리 기능 추가 및 UI 개선)
+# 4. 월별 근무기록 관리 (일괄 관리 기능 강화 및 UI/UX 개선)
 # =============================================================================
 def render_store_attendance(user_info):
     st.subheader("⏰ 월별 근무기록 관리")
@@ -155,15 +155,12 @@ def render_store_attendance(user_info):
         st.warning("먼저 '직원 정보' 탭에서 '재직중' 상태의 직원을 한 명 이상 등록해주세요.")
         return
 
-    # --- 1. 월 선택 (항상 표시) ---
     selected_month_str = st.selectbox("관리할 년/월 선택",
         options=[(date.today() - relativedelta(months=i)).strftime('%Y년 / %m월') for i in range(12)],
-        key="month_selector"
-    )
+        key="month_selector")
     selected_month = datetime.strptime(selected_month_str, '%Y년 / %m월')
     start_date, end_date = selected_month.date(), (selected_month.date() + relativedelta(months=1)) - timedelta(days=1)
 
-    # --- 2. 데이터 로드 및 전처리 ---
     attendance_detail_df = load_data(SHEET_NAMES["ATTENDANCE_DETAIL"])
     month_records_df = pd.DataFrame()
     if not attendance_detail_df.empty and '근무일자' in attendance_detail_df.columns:
@@ -172,7 +169,6 @@ def render_store_attendance(user_info):
             (attendance_detail_df['지점명'] == store_name)
         ].copy()
 
-    # --- 3. UI 분기 처리 ---
     if month_records_df.empty:
         # (기본 스케줄 생성 로직은 이전과 동일)
         st.markdown("---")
@@ -190,7 +186,9 @@ def render_store_attendance(user_info):
                         uid = f"{dt.strftime('%y%m%d')}_{emp['이름']}_{int(datetime.now().timestamp())}_{len(new_records)}"
                         new_records.append({"기록ID": f"manual_{uid}", "지점명": store_name, "근무일자": dt.strftime('%Y-%m-%d'), "직원이름": emp['이름'], "구분": "정상근무", "출근시간": emp.get('기본출근', '09:00'), "퇴근시간": emp.get('기본퇴근', '18:00'), "비고": ""})
             if new_records and update_sheet(SHEET_NAMES["ATTENDANCE_DETAIL"], pd.concat([attendance_detail_df, pd.DataFrame(new_records)], ignore_index=True)):
-                st.success("기본 스케줄이 생성되었습니다."); st.rerun()
+                st.toast(f"✅ {selected_month_str}의 기본 스케줄이 성공적으로 생성되었습니다.")
+                st.rerun()
+
     else:
         # (근무 현황 요약 로직은 이전과 동일)
         if '총시간' not in month_records_df.columns: month_records_df['총시간'] = 0
@@ -233,7 +231,7 @@ def render_store_attendance(user_info):
 
         st.markdown("---")
         
-        # --- 신규 기능: 근무기록 일괄관리 ---
+        # --- 신규 기능: 근무기록 일괄관리 (방어 로직 및 UI 개선) ---
         with st.expander("🗂️ 근무기록 일괄관리", expanded=False):
             st.info("입사, 퇴사, 지점 이동 등으로 변경된 직원의 근무 기록을 특정 기간에 대해 일괄적으로 추가하거나 삭제합니다.")
             
@@ -244,44 +242,57 @@ def render_store_attendance(user_info):
             bulk_start_date = c1.date_input("시작일", value=start_date, min_value=start_date, max_value=end_date, key="bulk_start")
             bulk_end_date = c2.date_input("종료일", value=end_date, min_value=start_date, max_value=end_date, key="bulk_end")
 
-            confirm = st.checkbox(f"**주의:** '{bulk_emp_name}' 직원의 {bulk_start_date} ~ {bulk_end_date} 기록을 일괄 변경합니다. 실행하시겠습니까?")
+            # --- 방어 로직 1: 실행 전 미리보기 ---
+            if bulk_action == "입사/지점이동 (기록 추가)":
+                emp_info = store_employees_df[store_employees_df['이름'] == bulk_emp_name].iloc[0]
+                day_map = {'월': 0, '화': 1, '수': 2, '목': 3, '금': 4, '토': 5, '일': 6}
+                work_days = re.sub(r'요일|[,\s/]+', ' ', emp_info.get('근무요일', '')).split()
+                work_day_indices = {day_map[d[0]] for d in work_days if d and d[0] in day_map}
+                
+                # --- 방어 로직 2: 중복 추가 방지 ---
+                existing_records = attendance_detail_df[attendance_detail_df['직원이름'] == bulk_emp_name]
+                existing_dates = set(pd.to_datetime(existing_records['근무일자']).dt.date) if not existing_records.empty else set()
+                
+                potential_dates = [dt for dt in pd.date_range(bulk_start_date, bulk_end_date) if dt.weekday() in work_day_indices]
+                dates_to_add = [dt for dt in potential_dates if dt.date() not in existing_dates]
+                
+                st.warning(f"총 **{len(dates_to_add)}** 건의 근무 기록이 새로 추가됩니다. (이미 기록이 있는 날짜는 제외)")
+
+            elif bulk_action == "퇴사/지점이동 (기록 삭제)":
+                df_to_delete = attendance_detail_df.copy()
+                df_to_delete['근무일자_dt'] = pd.to_datetime(df_to_delete['근무일자']).dt.date
+                records_to_delete_count = len(df_to_delete[
+                    (df_to_delete['직원이름'] == bulk_emp_name) &
+                    (df_to_delete['근무일자_dt'] >= bulk_start_date) &
+                    (df_to_delete['근무일자_dt'] <= bulk_end_date)
+                ])
+                st.warning(f"총 **{records_to_delete_count}** 건의 근무 기록이 삭제됩니다.")
+
+            confirm = st.checkbox(f"**주의:** '{bulk_emp_name}' 직원의 {bulk_start_date} ~ {bulk_end_date} 기록을 일괄 변경합니다.")
 
             if st.button("🚀 일괄 적용하기", key="bulk_apply", disabled=not confirm):
-                # '기록 추가' 로직
                 if bulk_action == "입사/지점이동 (기록 추가)":
-                    emp_info = store_employees_df[store_employees_df['이름'] == bulk_emp_name].iloc[0]
                     new_records = []
-                    day_map = {'월': 0, '화': 1, '수': 2, '목': 3, '금': 4, '토': 5, '일': 6}
-                    work_days = re.sub(r'요일|[,\s/]+', ' ', emp_info.get('근무요일', '')).split()
-                    work_day_indices = {day_map[d[0]] for d in work_days if d and d[0] in day_map}
-                    
-                    for dt in pd.date_range(bulk_start_date, bulk_end_date):
-                        if dt.weekday() in work_day_indices:
-                            uid = f"{dt.strftime('%y%m%d')}_{emp_info['이름']}_{int(datetime.now().timestamp())}_{len(new_records)}"
-                            new_records.append({"기록ID": f"manual_{uid}", "지점명": store_name, "근무일자": dt.strftime('%Y-%m-%d'), "직원이름": emp_info['이름'], "구분": "정상근무", "출근시간": emp_info.get('기본출근', '09:00'), "퇴근시간": emp_info.get('기본퇴근', '18:00'), "비고": "일괄 추가"})
+                    for dt in dates_to_add: # 중복이 제거된 날짜 리스트 사용
+                        uid = f"{dt.strftime('%y%m%d')}_{emp_info['이름']}_{int(datetime.now().timestamp())}_{len(new_records)}"
+                        new_records.append({"기록ID": f"manual_{uid}", "지점명": store_name, "근무일자": dt.strftime('%Y-%m-%d'), "직원이름": emp_info['이름'], "구분": "정상근무", "출근시간": emp_info.get('기본출근', '09:00'), "퇴근시간": emp_info.get('기본퇴근', '18:00'), "비고": "일괄 추가"})
                     
                     if new_records:
                         final_df = pd.concat([attendance_detail_df, pd.DataFrame(new_records)], ignore_index=True)
                         if update_sheet(SHEET_NAMES["ATTENDANCE_DETAIL"], final_df):
-                            st.success(f"'{bulk_emp_name}' 직원의 근무 기록 {len(new_records)}건이 추가되었습니다."); st.rerun()
-                
-                # '기록 삭제' 로직
+                            st.toast(f"✅ '{bulk_emp_name}' 직원의 근무 기록 {len(new_records)}건이 추가되었습니다.")
+                            st.rerun()
+                    else:
+                        st.info("추가할 새로운 근무 기록이 없습니다. (모든 날짜에 이미 기록 존재)")
+
                 elif bulk_action == "퇴사/지점이동 (기록 삭제)":
                     original_count = len(attendance_detail_df)
-                    df_to_delete = attendance_detail_df.copy()
                     df_to_delete['근무일자_dt'] = pd.to_datetime(df_to_delete['근무일자']).dt.date
-                    
-                    final_df = df_to_delete[~(
-                        (df_to_delete['직원이름'] == bulk_emp_name) &
-                        (df_to_delete['근무일자_dt'] >= bulk_start_date) &
-                        (df_to_delete['근무일자_dt'] <= bulk_end_date)
-                    )].drop(columns=['근무일자_dt'])
-                    
-                    deleted_count = original_count - len(final_df)
+                    final_df = df_to_delete[~( (df_to_delete['직원이름'] == bulk_emp_name) & (df_to_delete['근무일자_dt'] >= bulk_start_date) & (df_to_delete['근무일자_dt'] <= bulk_end_date) )].drop(columns=['근무일자_dt'])
                     if update_sheet(SHEET_NAMES["ATTENDANCE_DETAIL"], final_df):
-                        st.success(f"'{bulk_emp_name}' 직원의 근무 기록 {deleted_count}건이 삭제되었습니다."); st.rerun()
-        
-        # --- 기존: 일일 근무 기록 상세 관리 ---
+                        st.toast(f"🗑️ '{bulk_emp_name}' 직원의 근무 기록 {original_count - len(final_df)}건이 삭제되었습니다.")
+                        st.rerun()
+
         st.markdown("##### ✍️ 근무 기록 관리")
         default_date = date.today() if start_date <= date.today() <= end_date else start_date
         selected_date = st.date_input("관리할 날짜 선택", value=default_date, min_value=start_date, max_value=end_date, key="date_selector", help="표를 수정하려면 먼저 날짜를 선택하세요.")
@@ -328,7 +339,8 @@ def render_store_attendance(user_info):
                     new_details.at[i, '지점명'] = store_name; new_details.at[i, '근무일자'] = selected_date.strftime('%Y-%m-%d')
                 final_df = pd.concat([other_month_records, other_day_records, new_details], ignore_index=True)
                 if update_sheet(SHEET_NAMES["ATTENDANCE_DETAIL"], final_df):
-                    st.success("변경사항이 성공적으로 저장되었습니다."); st.rerun()
+                    st.toast(f"✅ {selected_date.strftime('%m월 %d일')}의 근무 기록이 성공적으로 저장되었습니다.")
+                    st.rerun()
 
 # =============================================================================
 # 5. 정산 및 재고, 직원 정보 관리 (이전과 동일)
@@ -506,5 +518,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
