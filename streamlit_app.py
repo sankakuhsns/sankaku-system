@@ -342,9 +342,6 @@ def render_store_attendance(user_info):
                     st.toast(f"✅ {selected_date.strftime('%m월 %d일')}의 근무 기록이 성공적으로 저장되었습니다.")
                     st.rerun()
 
-# =============================================================================
-# 5. 정산 및 재고, 직원 정보 관리 (이전과 동일)
-# =============================================================================
 def render_store_settlement(user_info):
     st.subheader("💰 정산 및 재고")
     store_name = user_info['지점명']
@@ -404,36 +401,81 @@ def render_store_settlement(user_info):
 def render_store_employee_info(user_info):
     st.subheader("👥 직원 정보 관리")
     store_name = user_info['지점명']
-    with st.expander("➕ **신규 직원 등록하기**"):
+    
+    with st.expander("➕ **신규 직원 등록하기**", expanded=True):
         with st.form("new_employee_form", clear_on_submit=True):
+            st.info("각 항목을 정확하게 선택하고 입력해주세요. 잘못된 정보는 근무기록 생성 시 문제를 일으킬 수 있습니다.")
             col1, col2 = st.columns(2)
+            
             with col1:
-                emp_name, emp_position, emp_contact, emp_status = st.text_input("이름"), st.text_input("직책", "직원"), st.text_input("연락처 (숫자만 입력)"), st.selectbox("재직상태", ["재직중", "퇴사"])
+                emp_name = st.text_input("이름", help="직원의 실명을 입력하세요.")
+                emp_position = st.text_input("직책", "직원")
+                emp_contact = st.text_input("연락처", help="'-' 없이 숫자만 입력하세요.")
+                emp_status = st.selectbox("재직상태", ["재직중", "퇴사"], help="퇴사 처리 시 근무기록이 생성되지 않습니다.")
+            
             with col2:
-                emp_start_date, emp_health_cert_date, emp_work_days = st.date_input("입사일", date.today()), st.date_input("보건증만료일", date.today() + timedelta(days=365)), st.text_input("근무요일 (예: 월,화,수,목,금)")
+                emp_start_date = st.date_input("입사일", date.today())
+                emp_health_cert_date = st.date_input("보건증만료일", date.today() + timedelta(days=365))
+                
+                # --- 핵심 변경점: st.text_input -> st.multiselect ---
+                days_of_week = ["월", "화", "수", "목", "금", "토", "일"]
+                emp_work_days_list = st.multiselect(
+                    "근무요일 (중복 선택 가능)", 
+                    options=days_of_week,
+                    help="근무하는 요일을 모두 선택하세요. 이 정보를 기반으로 기본 스케줄이 생성됩니다."
+                )
+            
             col3, col4 = st.columns(2)
-            with col3: emp_start_time = st.time_input("기본출근", time(9, 0))
-            with col4: emp_end_time = st.time_input("기본퇴근", time(18, 0))
-            if st.form_submit_button("💾 신규 직원 저장", type="primary"):
-                if not emp_name: st.error("직원 이름은 반드시 입력해야 합니다.")
-                elif not emp_contact.isdigit(): st.error("연락처는 숫자만 입력해주세요.")
+            with col3: 
+                emp_start_time = st.time_input("기본출근", time(9, 0), help="기본 스케줄 생성 시 사용될 출근 시간입니다.")
+            with col4: 
+                emp_end_time = st.time_input("기본퇴근", time(18, 0), help="기본 스케줄 생성 시 사용될 퇴근 시간입니다.")
+
+            if st.form_submit_button("💾 신규 직원 저장", type="primary", use_container_width=True):
+                # --- 유효성 검사 강화 ---
+                if not emp_name:
+                    st.error("직원 이름은 반드시 입력해야 합니다.")
+                elif not emp_contact.isdigit():
+                    st.error("연락처는 '-' 없이 숫자만 입력해주세요.")
+                elif not emp_work_days_list:
+                    st.error("근무요일을 한 개 이상 선택해주세요.")
                 else:
+                    # 선택된 요일 리스트를 콤마(,)로 구분된 문자열로 변환하여 저장
+                    emp_work_days_str = ",".join(emp_work_days_list)
+                    
                     emp_id = f"{store_name.replace('점','')}_{emp_name}_{emp_start_date.strftime('%y%m%d')}"
-                    new_data = {"직원ID": emp_id, "이름": emp_name, "소속지점": store_name, "직책": emp_position, "입사일": emp_start_date.strftime('%Y-%m-%d'), "연락처": emp_contact, "보건증만료일": emp_health_cert_date.strftime('%Y-%m-%d'), "재직상태": emp_status, "근무요일": emp_work_days, "기본출근": emp_start_time.strftime('%H:%M'), "기본퇴근": emp_end_time.strftime('%H:%M')}
-                    if append_rows(SHEET_NAMES["EMPLOYEE_MASTER"], pd.DataFrame([new_data])):
-                        st.success(f"'{emp_name}' 직원의 정보가 등록되었습니다."); st.rerun()
+                    new_employee_data = pd.DataFrame([{
+                        "직원ID": emp_id, "이름": emp_name, "소속지점": store_name, 
+                        "직책": emp_position, "입사일": emp_start_date.strftime('%Y-%m-%d'), 
+                        "연락처": emp_contact, "보건증만료일": emp_health_cert_date.strftime('%Y-%m-%d'), 
+                        "재직상태": emp_status, "근무요일": emp_work_days_str, 
+                        "기본출근": emp_start_time.strftime('%H:%M'), "기본퇴근": emp_end_time.strftime('%H:%M')
+                    }])
+                    
+                    if append_rows(SHEET_NAMES["EMPLOYEE_MASTER"], new_employee_data):
+                        st.toast(f"✅ '{emp_name}' 직원의 정보가 성공적으로 등록되었습니다.")
+                        st.rerun()
+
     st.markdown("---")
     st.markdown("##### **우리 지점 직원 목록 (정보 수정/퇴사 처리)**")
+    
     all_employees_df = load_data(SHEET_NAMES["EMPLOYEE_MASTER"])
     store_employees_df = all_employees_df[all_employees_df['소속지점'] == store_name].copy()
+
     if not store_employees_df.empty:
-        st.info("💡 아래 표에서 직접 값을 수정하고 '변경사항 저장' 버튼을 누르세요.")
-        edited_df = st.data_editor(store_employees_df, key="employee_editor", use_container_width=True, disabled=["직원ID", "소속지점"])
+        st.info("💡 아래 표에서 직접 값을 수정하고 '변경사항 저장' 버튼을 누르세요. '근무요일'은 '월,화,수' 형식으로 입력해야 합니다.")
+        
+        edited_df = st.data_editor(
+            store_employees_df, key="employee_editor", use_container_width=True, disabled=["직원ID", "소속지점"]
+        )
+        
         if st.button("💾 변경사항 저장", type="primary", use_container_width=True):
             other_stores_df = all_employees_df[all_employees_df['소속지점'] != store_name]
             updated_full_df = pd.concat([other_stores_df, edited_df], ignore_index=True)
+            
             if update_sheet(SHEET_NAMES["EMPLOYEE_MASTER"], updated_full_df):
-                st.success("직원 정보가 성공적으로 업데이트되었습니다."); st.rerun()
+                st.toast("✅ 직원 정보가 성공적으로 업데이트되었습니다.")
+                st.rerun()
 
 # =============================================================================
 # 6. 관리자 페이지 기능 (이전과 동일)
@@ -518,6 +560,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
