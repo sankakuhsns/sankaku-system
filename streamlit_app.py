@@ -205,10 +205,44 @@ def render_store_attendance(user_info, employees_df, attendance_detail_df):
                 wks = writer.sheets['근무시간집계']; wks.set_column('A:A', 15); wks.set_column('B:D', 12)
             st.download_button("📥 엑셀 다운로드", output.getvalue(), f"{store_name}_{selected_month_str.replace(' / ', '_')}_근무시간집계.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
         st.markdown("---")
-        with st.expander("🗂️ 근무기록 일괄관리"):
-            # (일괄 관리 로직은 이전과 동일하나, 캐시 초기화 함수를 사용)
-            pass
         st.markdown("##### ✍️ 근무 기록 관리")
+        with st.expander("🗂️ 근무기록 일괄관리"):
+            st.info("입사, 퇴사, 지점 이동 등으로 변경된 직원의 근무 기록을 특정 기간에 대해 일괄적으로 추가하거나 삭제합니다.")
+            bulk_emp_name = st.selectbox("관리 대상 직원", options=store_employees_df['이름'].unique(), key="bulk_emp")
+            bulk_action = st.selectbox("관리 유형", ["입사/지점이동 (기록 추가)", "퇴사/지점이동 (기록 삭제)"], key="bulk_action")
+            c1, c2 = st.columns(2)
+            bulk_start_date = c1.date_input("시작일", value=start_date, min_value=start_date, max_value=end_date, key="bulk_start")
+            bulk_end_date = c2.date_input("종료일", value=end_date, min_value=start_date, max_value=end_date, key="bulk_end")
+            
+            if bulk_action == "입사/지점이동 (기록 추가)":
+                emp_info = store_employees_df[store_employees_df['이름'] == bulk_emp_name].iloc[0]
+                day_map = {'월': 0, '화': 1, '수': 2, '목': 3, '금': 4, '토': 5, '일': 6}
+                work_days = re.sub(r'요일|[,\s/]+', ' ', emp_info.get('근무요일', '')).split()
+                work_day_indices = {day_map[d[0]] for d in work_days if d and d[0] in day_map}
+                existing_dates = set(pd.to_datetime(attendance_detail_df[attendance_detail_df['직원이름'] == bulk_emp_name]['근무일자']).dt.date) if not attendance_detail_df.empty else set()
+                potential_dates = [dt for dt in pd.date_range(bulk_start_date, bulk_end_date) if dt.weekday() in work_day_indices]
+                dates_to_add = [dt for dt in potential_dates if dt.date() not in existing_dates]
+                st.warning(f"총 **{len(dates_to_add)}** 건의 근무 기록이 새로 추가됩니다. (이미 기록이 있는 날짜는 제외)")
+            elif bulk_action == "퇴사/지점이동 (기록 삭제)":
+                df_to_delete = attendance_detail_df.copy()
+                df_to_delete['근무일자_dt'] = pd.to_datetime(df_to_delete['근무일자']).dt.date
+                records_to_delete_count = len(df_to_delete[(df_to_delete['직원이름'] == bulk_emp_name) & (df_to_delete['근무일자_dt'] >= bulk_start_date) & (df_to_delete['근무일자_dt'] <= bulk_end_date)])
+                st.warning(f"총 **{records_to_delete_count}** 건의 근무 기록이 삭제됩니다.")
+
+            confirm = st.checkbox(f"**주의:** '{bulk_emp_name}' 직원의 {bulk_start_date} ~ {bulk_end_date} 기록을 일괄 변경합니다.")
+            if st.button("🚀 일괄 적용하기", key="bulk_apply", disabled=not confirm):
+                if bulk_action == "입사/지점이동 (기록 추가)":
+                    new_records = [{"기록ID": f"manual_{dt.strftime('%y%m%d')}_{emp_info['이름']}_{int(datetime.now().timestamp())}_{i}", "지점명": store_name, "근무일자": dt.strftime('%Y-%m-%d'), "직원이름": emp_info['이름'], "구분": "정상근무", "출근시간": emp_info.get('기본출근', '09:00'), "퇴근시간": emp_info.get('기본퇴근', '18:00'), "비고": "일괄 추가"} for i, dt in enumerate(dates_to_add)]
+                    if new_records and update_sheet_and_clear_cache(SHEET_NAMES["ATTENDANCE_DETAIL"], pd.concat([attendance_detail_df, pd.DataFrame(new_records)], ignore_index=True)):
+                        st.toast(f"✅ '{bulk_emp_name}' 직원의 근무 기록 {len(new_records)}건이 추가되었습니다."); st.rerun()
+                    else: st.info("추가할 새로운 근무 기록이 없습니다.")
+                elif bulk_action == "퇴사/지점이동 (기록 삭제)":
+                    original_count = len(attendance_detail_df)
+                    df_to_delete['근무일자_dt'] = pd.to_datetime(df_to_delete['근무일자']).dt.date
+                    final_df = df_to_delete[~((df_to_delete['직원이름'] == bulk_emp_name) & (df_to_delete['근무일자_dt'] >= bulk_start_date) & (df_to_delete['근무일자_dt'] <= bulk_end_date))].drop(columns=['근무일자_dt'])
+                    if update_sheet_and_clear_cache(SHEET_NAMES["ATTENDANCE_DETAIL"], final_df):
+                        st.toast(f"🗑️ '{bulk_emp_name}' 직원의 근무 기록 {original_count - len(final_df)}건이 삭제되었습니다."); st.rerun()
+        
         default_date = date.today() if start_date <= date.today() <= end_date else start_date
         selected_date = st.date_input("관리할 날짜 선택", value=default_date, min_value=start_date, max_value=end_date, key="date_selector", help="표를 수정하려면 먼저 날짜를 선택하세요.")
         st.info(f"**{selected_date.strftime('%Y년 %m월 %d일')}**의 기록을 아래 표에서 직접 수정, 추가, 삭제할 수 있습니다.")
@@ -437,3 +471,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
