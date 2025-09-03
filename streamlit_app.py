@@ -17,7 +17,7 @@ SHEET_NAMES = {
     "STORE_MASTER": "지점마스터", "EMPLOYEE_MASTER": "직원마스터",
     "ATTENDANCE_DETAIL": "근무기록_상세", "INVENTORY_LOG": "월말재고_로그",
     "INVENTORY_MASTER": "재고마스터", "INVENTORY_DETAIL_LOG": "월말재고_상세로그",
-    "SALES_LOG": "매출_로그", "SETTLEMENT_LOG": "일일정산_로그" # 관리자 대시보드용
+    "SALES_LOG": "매출_로그", "SETTLEMENT_LOG": "일일정산_로그"
 }
 
 # =============================================================================
@@ -105,25 +105,41 @@ def _validate_work_days(days_str):
     parts = str(days_str).strip().split(',')
     return all(day.strip() in valid_days for day in parts)
 
-def create_excel_report(summary_pivot, display_summary, selected_month_str, store_name):
+def create_excel_report(summary_pivot, display_summary, month_records_df, selected_month_str, store_name):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         summary_pivot.to_excel(writer, sheet_name='월별 근무 현황', startrow=1)
         display_summary.to_excel(writer, sheet_name='근무 시간 집계', index=False, startrow=1)
+        if not month_records_df.empty:
+            attendance_log = month_records_df[['근무일자', '직원이름', '구분', '출근시간', '퇴근시간', '총시간']].rename(
+                columns={'근무일자': '날짜', '직원이름': '이름', '총시간': '근무시간(h)'}
+            ).sort_values(by=['날짜', '이름'])
+            attendance_log.to_excel(writer, sheet_name='출근부', index=False, startrow=1)
+
         workbook = writer.book
         title_format = workbook.add_format({'bold': True, 'font_size': 14, 'align': 'left'})
         header_format = workbook.add_format({'bold': True, 'valign': 'top', 'fg_color': '#DDEBF7', 'border': 1, 'align': 'center'})
+        
         worksheet1 = writer.sheets['월별 근무 현황']
         worksheet1.write('A1', f"{selected_month_str.replace(' / ', '.')} 근무 현황", title_format)
         worksheet1.set_column('A:A', 12); worksheet1.set_column('B:AF', 5)
         worksheet1.write('A2', '직원이름', header_format)
         for col_num, value in enumerate(summary_pivot.columns.values):
             worksheet1.write(1, col_num + 1, value, header_format)
+        
         worksheet2 = writer.sheets['근무 시간 집계']
         worksheet2.write('A1', f"{selected_month_str.replace(' / ', '.')} 근무 시간 집계", title_format)
         worksheet2.set_column('A:D', 15)
         for col_num, value in enumerate(display_summary.columns.values):
             worksheet2.write(1, col_num, value, header_format)
+
+        if '출근부' in writer.sheets:
+            worksheet3 = writer.sheets['출근부']
+            worksheet3.write('A1', f"{selected_month_str.replace(' / ', '.')} 출근부", title_format)
+            worksheet3.set_column('A:A', 12); worksheet3.set_column('B:B', 12)
+            worksheet3.set_column('C:F', 10)
+            for col_num, value in enumerate(attendance_log.columns.values):
+                worksheet3.write(1, col_num, value, header_format)
     return output.getvalue()
 
 def check_health_cert_expiration(user_info, all_employees_df):
@@ -215,7 +231,16 @@ def render_store_attendance(user_info, employees_df, attendance_detail_df):
         st.markdown("---"); st.markdown("##### 🗓️ 근무 현황 요약")
         summary_pivot = month_records_df.pivot_table(index='직원이름', columns=pd.to_datetime(month_records_df['근무일자']).dt.day, values='총시간', aggfunc='sum').reindex(columns=range(1, end_date.day + 1))
         summary_pivot.columns = [f"{day}" for day in range(1, end_date.day + 1)]
-        st.dataframe(summary_pivot.style.format(lambda val: f"{val:.1f}" if pd.notna(val) else ""), use_container_width=True)
+        kr_holidays = holidays.KR(years=selected_month.year)
+        def style_day_columns(col):
+            try:
+                d = date(selected_month.year, selected_month.month, int(col.name))
+                if d in kr_holidays: return ['background-color: #ffcccc'] * len(col)
+                if d.weekday() == 6: return ['background-color: #ffdddd'] * len(col)
+                if d.weekday() == 5: return ['background-color: #ddeeff'] * len(col)
+                return [''] * len(col)
+            except (ValueError, TypeError): return [''] * len(col)
+        st.dataframe(summary_pivot.style.apply(style_day_columns, axis=0).format(lambda val: f"{val:.1f}" if pd.notna(val) else ""), use_container_width=True)
         
         summary = month_records_df.pivot_table(index='직원이름', columns='구분', values='총시간', aggfunc='sum', fill_value=0)
         required_cols = ['정상근무', '연장근무']
@@ -227,7 +252,7 @@ def render_store_attendance(user_info, employees_df, attendance_detail_df):
 
         with st.expander("📊 엑셀 리포트 다운로드"):
             st.info("현재 조회중인 월의 근무 현황 전체를 서식이 적용된 엑셀 파일로 다운로드합니다.")
-            excel_data = create_excel_report(summary_pivot, display_summary, selected_month_str, store_name)
+            excel_data = create_excel_report(summary_pivot, display_summary, month_records_df, selected_month_str, store_name)
             st.download_button(label="📥 **월별 리포트 엑셀 다운로드**", data=excel_data, file_name=f"{store_name}_{selected_month_str.replace(' / ', '_')}_월별근무보고서.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
         
         st.markdown("---"); st.markdown("##### ✍️ 근무 기록 관리")
@@ -300,7 +325,7 @@ def render_store_attendance(user_info, employees_df, attendance_detail_df):
                 if overlap_employees:
                     st.error(f"근무 시간이 겹칩니다. 직원: {', '.join(set(overlap_employees))}"); error_found = True
             if not error_found:
-                other_records = attendance_detail_df[attendance_detail_df['근무일자'] != selected_date.strftime('%Y-%m-%d')]
+                other_records = attendance_detail_df[~attendance_detail_df['기록ID'].isin(processed_df['기록ID'])]
                 new_details = processed_df.copy()
                 for i, row in new_details.iterrows():
                     if pd.isna(row.get('기록ID')) or row.get('기록ID') == '':
@@ -317,46 +342,82 @@ def render_store_inventory_check(user_info, inventory_master_df, inventory_log_d
     
     if inventory_master_df.empty:
         st.error("'재고마스터' 시트에 품목을 먼저 등록해주세요."); return
+    if '종류' not in inventory_master_df.columns:
+        st.error("'재고마스터' 시트에 '종류' 열을 추가해주세요."); return
 
     options = [(date.today() - relativedelta(months=i)) for i in range(12)]
     selected_month = st.selectbox("재고를 확인할 년/월 선택", options=options, format_func=lambda d: d.strftime('%Y년 / %m월'))
     selected_month_str = selected_month.strftime('%Y-%m')
     
+    if f"inventory_cart_{selected_month_str}" not in st.session_state:
+        st.session_state[f"inventory_cart_{selected_month_str}"] = {}
+    
+    cart_key = f"inventory_cart_{selected_month_str}"
+    
     st.markdown("---")
-    st.info("각 품목의 현재 수량을 입력하면 총액이 자동 계산됩니다.")
     
-    editable_df = inventory_master_df.copy()
-    if '수량' not in editable_df.columns: editable_df['수량'] = 0
-    editable_df['소계'] = 0
+    col1, col2 = st.columns([6, 4])
     
-    edited_df = st.data_editor(editable_df, key=f"inventory_editor_{selected_month_str}", use_container_width=True,
-        column_config={ "품목명": st.column_config.TextColumn("품목명", disabled=True), "단위": st.column_config.TextColumn("단위", disabled=True), "단가": st.column_config.NumberColumn("단가", disabled=True, format="%,d 원"), "수량": st.column_config.NumberColumn("수량", min_value=0, step=1), "소계": st.column_config.NumberColumn("소계", disabled=True, format="%,d 원") },
-        hide_index=True)
-    
-    total_inventory_value = (edited_df['단가'] * edited_df['수량']).sum() if not edited_df.empty else 0
-    st.markdown("---"); st.metric("**월말 재고 총 합계액**", f"₩ {total_inventory_value:,.0f}")
+    with col1:
+        st.markdown("##### 🛒 품목 선택")
+        search_term = st.text_input("품목 검색", placeholder="품목명으로 검색...")
+        categories = ["전체"] + sorted(inventory_master_df['종류'].unique().tolist())
+        selected_category = st.selectbox("종류 필터", options=categories)
 
-    if st.button(f"💾 {selected_month.strftime('%Y년 %m월')} 재고 제출하기", type="primary", use_container_width=True):
-        if '평가년월' in inventory_log_df.columns:
-            inventory_log_df['평가년월'] = pd.to_datetime(inventory_log_df['평가년월'], errors='coerce').dt.strftime('%Y-%m')
-        existing_indices = inventory_log_df[(inventory_log_df['평가년월'] == selected_month_str) & (inventory_log_df['지점명'] == store_name)].index
-        if not existing_indices.empty:
-            inventory_log_df.loc[existing_indices, ['재고평가액', '입력일시']] = [total_inventory_value, datetime.now().strftime('%Y-%m-%d %H:%M:%S')]
-        else:
-            new_row = pd.DataFrame([{'평가년월': selected_month_str, '지점명': store_name, '재고평가액': total_inventory_value, '입력일시': datetime.now().strftime('%Y-%m-%d %H:%M:%S'), '입력자': user_info['지점ID']}])
-            inventory_log_df = pd.concat([inventory_log_df, new_row], ignore_index=True)
-        update_success = update_sheet_and_clear_cache(SHEET_NAMES["INVENTORY_LOG"], inventory_log_df)
+        display_df = inventory_master_df.copy()
+        if search_term:
+            display_df = display_df[display_df['품목명'].str.contains(search_term, case=False, na=False)]
+        if selected_category != "전체":
+            display_df = display_df[display_df['종류'] == selected_category]
 
-        detail_log_df = edited_df[edited_df['수량'] > 0].copy()
-        if not detail_log_df.empty:
-            detail_log_df['소계'] = detail_log_df['단가'] * detail_log_df['수량']
-            detail_log_df['평가년월'] = selected_month_str; detail_log_df['지점명'] = store_name
-            detail_log_df = detail_log_df[['평가년월', '지점명', '품목명', '단위', '단가', '수량', '소계']]
-            append_success = append_rows_and_clear_cache(SHEET_NAMES["INVENTORY_DETAIL_LOG"], detail_log_df)
-        else: append_success = True
+        st.info("수량을 입력하고 '장바구니에 담기' 버튼을 누르세요.")
+        if '수량' not in display_df.columns: display_df['수량'] = 0
         
-        if update_success and append_success:
-            st.toast(f"✅ {selected_month_str}의 재고({total_inventory_value:,.0f}원)가 성공적으로 제출되었습니다."); st.rerun()
+        edited_items = st.data_editor(display_df[['품목명', '종류', '단위', '단가', '수량']],
+            key=f"inventory_adder_{selected_month_str}", use_container_width=True,
+            column_config={ "품목명": st.column_config.TextColumn(disabled=True), "종류": st.column_config.TextColumn(disabled=True), "단위": st.column_config.TextColumn(disabled=True), "단가": st.column_config.NumberColumn(disabled=True, format="%,d 원"), "수량": st.column_config.NumberColumn(min_value=0, step=1)},
+            hide_index=True)
+
+        if st.button("➕ 장바구니에 담기", use_container_width=True):
+            for _, row in edited_items[edited_items['수량'] > 0].iterrows():
+                st.session_state[cart_key][row['품목명']] = row.to_dict()
+            st.toast("🛒 장바구니에 품목을 담았습니다.")
+            st.rerun()
+
+    with col2:
+        st.markdown("##### 📋 담은 재고 목록")
+        if not st.session_state[cart_key]:
+            st.info("아직 담은 품목이 없습니다.")
+        else:
+            cart_df = pd.DataFrame(list(st.session_state[cart_key].values()))
+            cart_df['소계'] = cart_df['단가'] * cart_df['수량']
+            st.dataframe(cart_df[['품목명', '수량', '단위', '소계']].style.format({"소계": "₩{:,}"}), use_container_width=True, hide_index=True)
+            
+            total_value = cart_df['소계'].sum()
+            st.metric("**재고 총액**", f"₩ {total_value:,.0f}")
+
+            if st.button("🗑️ 장바구니 비우기", use_container_width=True):
+                st.session_state[cart_key] = {}; st.rerun()
+            
+            if st.button(f"💾 {selected_month.strftime('%Y년 %m월')} 재고 제출", type="primary", use_container_width=True):
+                if '평가년월' in inventory_log_df.columns:
+                    inventory_log_df['평가년월'] = pd.to_datetime(inventory_log_df['평가년월'], errors='coerce').dt.strftime('%Y-%m')
+                existing_indices = inventory_log_df[(inventory_log_df['평가년월'] == selected_month_str) & (inventory_log_df['지점명'] == store_name)].index
+                if not existing_indices.empty:
+                    inventory_log_df.loc[existing_indices, ['재고평가액', '입력일시']] = [total_value, datetime.now().strftime('%Y-%m-%d %H:%M:%S')]
+                else:
+                    new_row = pd.DataFrame([{'평가년월': selected_month_str, '지점명': store_name, '재고평가액': total_value, '입력일시': datetime.now().strftime('%Y-%m-%d %H:%M:%S'), '입력자': user_info['지점ID']}])
+                    inventory_log_df = pd.concat([inventory_log_df, new_row], ignore_index=True)
+                update_success = update_sheet_and_clear_cache(SHEET_NAMES["INVENTORY_LOG"], inventory_log_df)
+
+                cart_df_final = cart_df.copy()
+                cart_df_final['평가년월'] = selected_month_str; cart_df_final['지점명'] = store_name
+                cart_df_final = cart_df_final[['평가년월', '지점명', '품목명', '단위', '단가', '수량', '소계']]
+                append_success = append_rows_and_clear_cache(SHEET_NAMES["INVENTORY_DETAIL_LOG"], cart_df_final)
+                
+                if update_success and append_success:
+                    st.session_state[cart_key] = {}
+                    st.toast(f"✅ {selected_month_str}의 재고({total_value:,.0f}원)가 성공적으로 제출되었습니다."); st.rerun()
 
 def render_store_employee_info(user_info, employees_df):
     st.subheader("👥 직원 정보 관리")
@@ -465,40 +526,36 @@ def main():
                     "inventory": load_data(SHEET_NAMES["INVENTORY_LOG"]),
                     "inventory_master": load_data(SHEET_NAMES["INVENTORY_MASTER"]),
                     "inventory_detail_log": load_data(SHEET_NAMES["INVENTORY_DETAIL_LOG"]),
+                    "stores": load_data(SHEET_NAMES["STORE_MASTER"]),
                     "sales": load_data(SHEET_NAMES["SALES_LOG"]),
                     "settlement": load_data(SHEET_NAMES["SETTLEMENT_LOG"]),
-                    "stores": load_data(SHEET_NAMES["STORE_MASTER"]),
                 }
         
         cache = st.session_state['data_cache']
-        employees_df, attendance_df = cache['employees'], cache['attendance']
-        inventory_df, inventory_master_df, inventory_detail_log_df = cache['inventory'], cache['inventory_master'], cache['inventory_detail_log']
-        sales_df, settlement_df, stores_df = cache['sales'], cache['settlement'], cache['stores']
-        
         user_info = st.session_state['user_info']
         role, name = user_info.get('역할', 'store'), user_info.get('지점명', '사용자')
         st.sidebar.success(f"**{name}** ({role})님, 환영합니다.")
         st.sidebar.markdown("---")
         if role != 'admin':
-            check_health_cert_expiration(user_info, employees_df)
+            check_health_cert_expiration(user_info, cache['employees'])
         if st.sidebar.button("로그아웃"):
             st.session_state.clear(); st.rerun()
         
         if role == 'admin':
             st.title("👑 관리자 페이지")
             admin_tabs = st.tabs(["📊 통합 대시보드", "🗂️ 전 직원 관리", "⚙️ 데이터 및 설정"])
-            with admin_tabs[0]: render_admin_dashboard(sales_df, settlement_df)
-            with admin_tabs[1]: render_admin_employee_management(employees_df)
-            with admin_tabs[2]: render_admin_settings(stores_df)
+            with admin_tabs[0]: render_admin_dashboard(cache['sales'], cache['settlement'])
+            with admin_tabs[1]: render_admin_employee_management(cache['employees'])
+            with admin_tabs[2]: render_admin_settings(cache['stores'])
         else:
             st.title(f"🏢 {name} 지점 관리 시스템")
             store_tabs = st.tabs(["⏰ 월별 근무기록", "📦 월말 재고확인", "👥 직원 정보"])
             with store_tabs[0]:
-                render_store_attendance(user_info, employees_df, attendance_df)
+                render_store_attendance(user_info, cache['employees'], cache['attendance'])
             with store_tabs[1]:
-                render_store_inventory_check(user_info, inventory_master_df, inventory_df, inventory_detail_log_df)
+                render_store_inventory_check(user_info, cache['inventory_master'], cache['inventory'], cache['inventory_detail_log'])
             with store_tabs[2]:
-                render_store_employee_info(user_info, employees_df)
+                render_store_employee_info(user_info, cache['employees'])
 
 if __name__ == "__main__":
     main()
