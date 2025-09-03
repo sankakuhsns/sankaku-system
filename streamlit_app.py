@@ -24,6 +24,8 @@ SHEET_NAMES = {
     "DISPATCH_LOG": "파견_로그"
 }
 
+THEME = { "BORDER": "#e8e8ee", "PRIMARY": "#1C6758", "BG": "#f7f8fa", "TEXT": "#222" }
+
 # =============================================================================
 # 1. 구글 시트 연결 및 데이터 처리 함수
 # =============================================================================
@@ -225,7 +227,7 @@ def render_store_attendance(user_info, employees_df, attendance_detail_df, lock_
         (lock_log_df['지점명'] == store_name) & (lock_log_df['마감유형'] == '근무')
     ]['마감년월'].tolist() if not lock_log_df.empty else []
 
-    month_options = [(date.today() - relativedelta(months=i)).date().replace(day=1) for i in range(4)]
+    month_options = [(date.today() - relativedelta(months=i)).replace(day=1) for i in range(4)]
     available_months = [m for m in month_options if m.strftime('%Y-%m') not in locked_months]
     
     if not available_months:
@@ -751,15 +753,15 @@ def main():
         if st.sidebar.button("로그아웃"):
             st.session_state.clear(); st.rerun()
         
-        st.markdown("""
-            <style>
-                .stTabs [data-baseweb="tab-list"] { gap: 2px; }
-                .stTabs [data-baseweb="tab"] {
-                    height: 50px; white-space: pre-wrap; background-color: #F0F2F6;
-                    border-radius: 4px 4px 0px 0px; gap: 1px; padding-top: 10px; padding-bottom: 10px;
-                }
-                .stTabs [aria-selected="true"] { background-color: #FFFFFF; }
-            </style>""", unsafe_allow_html=True)
+        st.markdown(f"""<br><style>
+            .stTabs [data-baseweb="tab-list"] {{ gap: 12px; }}
+            .stTabs [data-baseweb="tab"] {{ height: 42px; border: 1px solid {THEME['BORDER']}; border-radius: 12px; background-color: #fff; padding: 10px 14px; box-shadow: 0 1px 6px rgba(0,0,0,0.04); }}
+            .stTabs [aria-selected="true"] {{ border-color: {THEME['PRIMARY']}; color: {THEME['PRIMARY']}; box-shadow: 0 6px 16px rgba(28,103,88,0.18); font-weight: 700; }}
+            html, body, [data-testid="stAppViewContainer"] {{ background: {THEME['BG']}; color: {THEME['TEXT']}; }}
+            .block-container {{ padding-top: 2.4rem; padding-bottom: 1.6rem; }}
+            [data-testid="stAppViewContainer"] .main .block-container {{ max-width: 1050px; margin: 0 auto; padding: 0 12px; }}
+            .stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"] {{ display: none; }}
+        </style>""", unsafe_allow_html=True)
 
         if role == 'admin':
             st.title("👑 관리자 페이지")
