@@ -651,7 +651,14 @@ def render_admin_employee_management(cache):
 
     with tab1: # 전체 직원 현황
         st.markdown("###### ✈️ 인사 이동/파견 요청 처리")
-        pending_personnel = personnel_request_log_df[personnel_request_log_df['상태'] == STATUS["LOCK_REQUESTED"]]
+
+        # --- [오류 수정] ---
+        # personnel_request_log_df가 비어있지 않고, 필요한 컬럼이 모두 있는지 먼저 확인합니다.
+        pending_personnel = pd.DataFrame()
+        required_cols = ['상태', '요청일시', '요청직원', '요청유형', '상세내용']
+        if not personnel_request_log_df.empty and all(col in personnel_request_log_df.columns for col in required_cols):
+            pending_personnel = personnel_request_log_df[personnel_request_log_df['상태'] == STATUS["LOCK_REQUESTED"]]
+        
         if pending_personnel.empty:
             st.info("처리 대기 중인 인사 요청이 없습니다.")
         else:
@@ -734,7 +741,6 @@ def render_admin_employee_management(cache):
     with tab2:
         st.markdown("###### 📊 지점별 근무 시간 분석")
         if not attendance_df.empty:
-            # 총시간 계산이 전처리 단계에서 이뤄지지 않았으므로 여기서 계산
             if '총시간' not in attendance_df.columns or attendance_df['총시간'].isnull().all():
                 def calculate_duration(row):
                     try:
@@ -889,4 +895,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
