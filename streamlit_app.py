@@ -208,6 +208,19 @@ def login_screen():
 # =============================================================================
 # 4. 기능별 페이지 렌더링 함수
 # =============================================================================
+네, 이 TypeError는 st.expander 위젯의 disabled 속성에 전달되는 값의 계산 과정에서 발생한 문제입니다. '정산 마감' 여부를 확인하는 로직을 더 명확하고 안정적으로 수정하여 오류를 해결했습니다.
+
+오류 원인 분석
+is_locked라는 변수는 특정 월의 데이터가 잠겼는지 여부를 나타내는 True 또는 False 값을 가져야 합니다. 하지만, 데이터가 없는 특정 상황에서 이 변수가 올바르게 계산되지 않아 st.expander가 인식할 수 없는 값(타입)을 전달받아 TypeError가 발생했습니다.
+
+수정된 코드
+아래는 오류가 발생한 render_store_attendance 함수와, 동일한 오류를 예방하기 위해 함께 수정한 render_store_inventory_check 함수의 코드입니다. 이 두 함수만 복사하여 기존 코드에 덮어쓰시면 됩니다.
+
+Python
+
+# =============================================================================
+# 4-1. 월별 근무기록 관리 함수 (수정 완료)
+# =============================================================================
 def render_store_attendance(user_info, employees_df, attendance_detail_df, lock_log_df, dispatch_log_df):
     st.subheader("⏰ 월별 근무기록 관리")
     with st.expander("💡 도움말"):
@@ -436,6 +449,7 @@ def render_store_inventory_check(user_info, inventory_master_df, inventory_log_d
         (lock_log_df['지점명'] == store_name) & (lock_log_df['마감유형'] == '재고')
     ] if not lock_log_df.empty and '지점명' in lock_log_df.columns and '마감유형' in lock_log_df.columns else pd.DataFrame(columns=['마감년월', '상태'])
     
+    # --- AttributeError BUGFIX: 불필요한 .date() 호출 제거 ---
     month_options = [(date.today() - relativedelta(months=i)).replace(day=1) for i in range(4)]
     available_months = [m for m in month_options if m.strftime('%Y-%m') not in locked_months_df.get('마감년월', pd.Series(dtype=str)).tolist()]
     
@@ -443,8 +457,7 @@ def render_store_inventory_check(user_info, inventory_master_df, inventory_log_d
         st.warning("조회 가능한 월이 없습니다. (모든 월이 정산 마감되었을 수 있습니다.)"); return
 
     selected_month_date = st.selectbox("재고를 확인할 년/월 선택", options=available_months, format_func=lambda d: d.strftime('%Y년 / %m월'))
-    
-    # --- AttributeError BUGFIX: selected_month_date가 None일 경우를 대비 ---
+
     if selected_month_date is None:
         st.warning("선택할 수 있는 월이 없습니다."); return
         
@@ -941,15 +954,35 @@ def main():
         if st.sidebar.button("로그아웃"):
             st.session_state.clear(); st.rerun()
         
+        # --- UI 개선: 발주 시스템 스타일 탭 CSS 적용 ---
         st.markdown(f"""<style>
             .stTabs [data-baseweb="tab-list"] {{ gap: 12px; }}
-            .stTabs [data-baseweb="tab"] {{ height: 42px; border: 1px solid {THEME['BORDER']}; border-radius: 12px; background-color: #fff; padding: 10px 14px; box-shadow: 0 1px 6px rgba(0,0,0,0.04); }}
-            .stTabs [aria-selected="true"] {{ border-color: {THEME['PRIMARY']}; color: {THEME['PRIMARY']}; box-shadow: 0 6px 16px rgba(28,103,88,0.18); font-weight: 700; }}
-            html, body, [data-testid="stAppViewContainer"] {{ background: {THEME['BG']}; }}
-            [data-testid="stAppViewContainer"] .main .block-container {{ max-width: 1050px; margin: 0 auto;}}
-            .stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"] {{ display: none; }}
+            .stTabs [data-baseweb="tab"] {{ 
+                height: 42px; 
+                border: 1px solid {THEME['BORDER']}; 
+                border-radius: 12px; 
+                background-color: #fff; 
+                padding: 10px 14px;
+                box-shadow: 0 1px 6px rgba(0,0,0,0.04); 
+            }}
+            .stTabs [aria-selected="true"] {{ 
+                border-color: {THEME['PRIMARY']}; 
+                color: {THEME['PRIMARY']};
+                box-shadow: 0 6px 16px rgba(28,103,88,0.18); 
+                font-weight: 700; 
+            }}
+            html, body, [data-testid="stAppViewContainer"] {{ 
+                background: {THEME['BG']}; 
+            }}
+            [data-testid="stAppViewContainer"] .main .block-container {{ 
+                max-width: 1050px; 
+                margin: 0 auto;
+            }}
+            .stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"] {{ 
+                display: none; 
+            }}
         </style>""", unsafe_allow_html=True)
-
+        
         if role == 'admin':
             st.title("👑 관리자 페이지")
             admin_tabs = st.tabs(["📊 통합 대시보드", "🧾 정산 관리", "📈 지점 분석", "👨‍💼 전 직원 관리", "📦 재고 관리", "✅ 승인 관리", "⚙️ 시스템 관리"])
@@ -972,4 +1005,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
