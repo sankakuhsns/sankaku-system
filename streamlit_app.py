@@ -70,11 +70,30 @@ def append_rows(sheet_name, rows_df):
 # 2. 헬퍼 함수 (시간 변환 함수 추가)
 # =============================================================================
 def _format_time_input(time_input):
+    """더 유연한 시간 입력(H:MM, HMM 등)을 표준 HH:MM 형식으로 변환하고 유효성을 검사합니다."""
     s = str(time_input).strip()
-    if len(s) == 4 and s.isdigit():
-        s = f"{s[:2]}:{s[2:]}"
+
+    # Case 1: 콜론(:)이 있는 경우 (예: "9:00", "10:30")
+    if ':' in s:
+        parts = s.split(':')
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            hour = parts[0].zfill(2)  # "9" -> "09"로 변환
+            minute = parts[1].zfill(2) # "0" -> "00"으로 변환
+            s = f"{hour}:{minute}"
+
+    # Case 2: 콜론 없고 숫자로만 이루어진 경우 (예: "900", "0900", "1030")
+    elif s.isdigit():
+        if len(s) == 3:  # HMM 형식 (예: 900 -> 09:00)
+            s = f"0{s[0]}:{s[1:]}"
+        elif len(s) == 4:  # HHMM 형식 (예: 0900 -> 09:00)
+            s = f"{s[:2]}:{s[2:]}"
+
+    # 최종적으로 HH:MM 형식인지 정규식으로 검사
     time_pattern = re.compile(r'^([01]\d|2[0-3]):([0-5]\d)$')
-    return s if time_pattern.match(s) else None
+    if time_pattern.match(s):
+        return s  # 유효한 형식이면 변환된 문자열 반환
+    else:
+        return None # 유효하지 않으면 None 반환
 
 def check_health_cert_expiration(user_info):
     store_name = user_info['지점명']
@@ -123,7 +142,7 @@ def login_screen():
 
 
 # =============================================================================
-# 4. 월별 근무기록 관리 (UI/UX 최종 개선안)
+# 4. 월별 근무기록 관리 (개선된 _format_time_input 함수 사용)
 # =============================================================================
 def render_store_attendance(user_info):
     st.subheader("⏰ 월별 근무기록 관리")
@@ -229,7 +248,10 @@ def render_store_attendance(user_info):
             daily_records_df = month_records_df[month_records_df['근무일자'] == selected_date.strftime('%Y-%m-%d')].copy()
             daily_records_df.drop(columns=['총시간', '지점명'], inplace=True, errors='ignore'); daily_records_df.reset_index(drop=True, inplace=True)
             edited_df = st.data_editor(daily_records_df, key=f"editor_{selected_date}", num_rows="dynamic", use_container_width=True,
-                column_config={"기록ID": None, "근무일자": None, "직원이름": st.column_config.SelectboxColumn("이름", options=list(store_employees_df['이름'].unique()), required=True), "구분": st.column_config.SelectboxColumn("구분", options=["정상근무", "연장근무", "유급휴가", "무급휴가", "결근"], required=True), "출근시간": st.column_config.TextColumn("출근(HH:MM)", help="`1830` 또는 `18:30` 형식으로 입력 가능", default="09:00", required=True), "퇴근시간": st.column_config.TextColumn("퇴근(HH:MM)", help="`0900` 또는 `09:00` 형식으로 입력 가능", default="18:00", required=True), "비고": st.column_config.TextColumn("비고")},
+                column_config={"기록ID": None, "근무일자": None, "직원이름": st.column_config.SelectboxColumn("이름", options=list(store_employees_df['이름'].unique()), required=True), "구분": st.column_config.SelectboxColumn("구분", options=["정상근무", "연장근무", "유급휴가", "무급휴가", "결근"], required=True), 
+                               "출근시간": st.column_config.TextColumn("출근(HH:MM)", help="`9:00`, `900`, `0900` 형식 모두 가능", default="09:00", required=True), 
+                               "퇴근시간": st.column_config.TextColumn("퇴근(HH:MM)", help="`18:30`, `1830` 형식 모두 가능", default="18:00", required=True), 
+                               "비고": st.column_config.TextColumn("비고")},
                 hide_index=True, column_order=["직원이름", "구분", "출근시간", "퇴근시간", "비고"])
 
             if st.button(f"💾 {selected_date.strftime('%m월 %d일')} 기록 저장", type="primary", use_container_width=True):
@@ -242,7 +264,7 @@ def render_store_attendance(user_info):
                     processed_df['퇴근시간'] = processed_df['퇴근시간'].apply(_format_time_input)
                     invalid_rows = edited_df.loc[processed_df['출근시간'].isnull() | processed_df['퇴근시간'].isnull(), '직원이름']
                     if not invalid_rows.empty:
-                        st.error(f"시간 형식이 잘못되었습니다 (HHMM 또는 HH:MM). 직원: {', '.join(set(invalid_rows))}"); error_found = True
+                        st.error(f"시간 형식이 잘못되었습니다. 직원: {', '.join(set(invalid_rows))}"); error_found = True
                 if not error_found:
                     df_check = processed_df.copy()
                     df_check['start_dt'] = pd.to_datetime(selected_date.strftime('%Y-%m-%d') + ' ' + df_check['출근시간'], errors='coerce')
@@ -444,3 +466,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
