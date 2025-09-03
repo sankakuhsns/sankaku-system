@@ -538,8 +538,6 @@ def render_admin_settlement_management(cache):
     
     lock_log_df = cache["SETTLEMENT_LOCK_LOG"]
     inventory_detail_log_df = cache["INVENTORY_DETAIL_LOG"]
-    sales_df = cache["SALES_LOG"]
-    settlement_df = cache["SETTLEMENT_LOG"]
 
     tab1, tab2, tab3 = st.tabs(["📂 매출 정보", "✍️ 지출 정보", "📦 월말 재고"])
 
@@ -567,7 +565,7 @@ def render_admin_settlement_management(cache):
         template_df_exp = pd.DataFrame([{"정산일자": "2025-09-01", "지점명": "전대점", "대분류": "식자재", "상세내용": "삼겹살 10kg", "금액": 150000}])
         output_exp = io.BytesIO()
         template_df_exp.to_excel(output_exp, index=False, sheet_name='지출 업로드 양식')
-        st.download_button("📥 지출 엑셀 양식 다운로드", data=output_exp.getvalue(), file_name="지출_업로드_양식.xlsx")
+        st.download_button("📥 지출 엑셀 양식 다운로드", data=output_exp.getvalue(), file_name="지출_업로드_양식.xlsx", key="exp_template_downloader")
         
         uploaded_file_exp = st.file_uploader("지출 엑셀 파일 업로드", type=["xlsx"], key="settlement_uploader")
         if uploaded_file_exp:
@@ -601,7 +599,17 @@ def render_admin_settlement_management(cache):
 
         st.markdown("---")
         st.markdown("###### 📦 재고 정산 마감 관리")
-        pending_locks = lock_log_df[(lock_log_df['상태'] == STATUS["LOCK_REQUESTED"]) & (lock_log_df['마감유형'] == '재고')]
+
+        # --- [오류 수정] ---
+        # lock_log_df가 비어있지 않고, 필요한 컬럼이 모두 있는지 먼저 확인합니다.
+        pending_locks = pd.DataFrame()
+        required_cols = ['상태', '마감유형', '마감년월', '지점명']
+        if not lock_log_df.empty and all(col in lock_log_df.columns for col in required_cols):
+            pending_locks = lock_log_df[
+                (lock_log_df['상태'] == STATUS["LOCK_REQUESTED"]) &
+                (lock_log_df['마감유형'] == '재고')
+            ]
+        
         if pending_locks.empty:
             st.info("처리 대기 중인 재고 정산 마감 요청이 없습니다.")
         else:
@@ -881,3 +889,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
