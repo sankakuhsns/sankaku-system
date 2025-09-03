@@ -359,9 +359,17 @@ def render_store_attendance(user_info, employees_df, attendance_detail_df, lock_
     if store_employees_df.empty:
         st.warning("관리할 직원이 없습니다."); return
 
-    locked_months_df = lock_log_df[
-        (lock_log_df['지점명'] == store_name) & (lock_log_df['마감유형'] == '근무') & (lock_log_df['상태'] == STATUS["LOCK_APPROVED"])
-    ] if not lock_log_df.empty else pd.DataFrame()
+    # --- [오류 수정] ---
+    # lock_log_df가 비어있지 않고, 필요한 컬럼이 모두 있는지 먼저 확인합니다.
+    locked_months_df = pd.DataFrame()
+    required_lock_cols = ['지점명', '마감유형', '상태', '마감년월']
+    if not lock_log_df.empty and all(col in lock_log_df.columns for col in required_lock_cols):
+        locked_months_df = lock_log_df[
+            (lock_log_df['지점명'] == store_name) & 
+            (lock_log_df['마감유형'] == '근무') & 
+            (lock_log_df['상태'] == STATUS["LOCK_APPROVED"])
+        ]
+    
     locked_months = locked_months_df.get('마감년월', pd.Series(dtype=str)).tolist()
     
     month_options = [(date.today() - relativedelta(months=i)).replace(day=1) for i in range(4)]
@@ -373,13 +381,18 @@ def render_store_attendance(user_info, employees_df, attendance_detail_df, lock_
         
     selected_month_str = selected_month_date.strftime('%Y-%m')
     
-    is_locked = selected_month_str in locked_months
+    # --- [오류 수정] ---
+    # current_lock_request를 찾기 전에도 동일한 방어 코드를 적용합니다.
     lock_status = "미요청"
-    current_lock_request = lock_log_df[
-        (lock_log_df['지점명'] == store_name) & (lock_log_df['마감유형'] == '근무') & (lock_log_df['마감년월'] == selected_month_str)
-    ]
-    if not current_lock_request.empty:
-        lock_status = current_lock_request.iloc[0]['상태']
+    current_lock_request = pd.DataFrame()
+    if not lock_log_df.empty and all(col in lock_log_df.columns for col in required_lock_cols):
+        current_lock_request = lock_log_df[
+            (lock_log_df['지점명'] == store_name) & 
+            (lock_log_df['마감유형'] == '근무') & 
+            (lock_log_df['마감년월'] == selected_month_str)
+        ]
+        if not current_lock_request.empty:
+            lock_status = current_lock_request.iloc[0]['상태']
     
     is_locked = lock_status in [STATUS["LOCK_APPROVED"], STATUS["LOCK_REQUESTED"]]
     
@@ -424,7 +437,6 @@ def render_store_attendance(user_info, employees_df, attendance_detail_df, lock_
     elif lock_status == STATUS["LOCK_REJECTED"]:
         st.error(f"❌ 관리자가 {selected_month_str} 마감 요청을 반려했습니다. 기록 수정 후 다시 요청해주세요.")
         if st.button(f"🔒 {selected_month_str} 근무기록 재요청하기", use_container_width=True, type="primary"):
-            # 기존 반려 요청을 요청 상태로 업데이트
             lock_log_df.loc[current_lock_request.index, '상태'] = STATUS["LOCK_REQUESTED"]
             lock_log_df.loc[current_lock_request.index, '요청일시'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             if update_sheet_and_clear_cache(SHEET_NAMES["SETTLEMENT_LOCK_LOG"], lock_log_df):
@@ -434,7 +446,6 @@ def render_store_attendance(user_info, employees_df, attendance_detail_df, lock_
             new_lock_request = pd.DataFrame([{"마감년월": selected_month_str, "지점명": store_name, "마감유형": "근무", "상태": STATUS["LOCK_REQUESTED"], "요청일시": datetime.now().strftime('%Y-%m-%d %H:%M:%S'), "처리일시": "", "실행관리자": ""}])
             if append_rows_and_clear_cache(SHEET_NAMES["SETTLEMENT_LOCK_LOG"], new_lock_request):
                 st.toast("✅ 관리자에게 마감 요청을 보냈습니다."); st.rerun()
-
 
 # =============================================================================
 # 4-2. [지점] 월말 재고확인
@@ -993,3 +1004,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
