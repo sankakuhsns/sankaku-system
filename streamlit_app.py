@@ -788,7 +788,13 @@ def main():
 
         if role == 'admin':
             st.title("👑 관리자 페이지")
-            # ... (관리자 탭 렌더링) ...
+            admin_tabs = st.tabs(["📊 통합 대시보드", "🧾 정산 관리", "📈 지점 분석", "👨‍💼 전 직원 관리", "📦 재고 관리", "⚙️ 시스템 관리"])
+            with admin_tabs[0]: render_admin_dashboard(cache['SALES_LOG'], cache['SETTLEMENT_LOG'], cache['EMPLOYEE_MASTER'], cache['INVENTORY_LOG'])
+            with admin_tabs[1]: render_admin_settlement(cache['SALES_LOG'], cache['SETTLEMENT_LOG'], cache['STORE_MASTER'])
+            with admin_tabs[2]: render_admin_analysis(cache['SALES_LOG'], cache['SETTLEMENT_LOG'], cache['INVENTORY_LOG'], cache['EMPLOYEE_MASTER'])
+            with admin_tabs[3]: render_admin_employee_management(cache['EMPLOYEE_MASTER'], cache['PERSONNEL_TRANSFER_LOG'], cache['STORE_MASTER'], cache['DISPATCH_LOG'])
+            with admin_tabs[4]: render_admin_inventory(cache['INVENTORY_MASTER'], cache['INVENTORY_DETAIL_LOG'])
+            with admin_tabs[5]: render_admin_settings(cache['STORE_MASTER'], cache['SETTLEMENT_LOCK_LOG'])
         else: # role == 'store'
             st.title(f"🏢 {name} 지점 관리 시스템")
             store_tabs = st.tabs(["⏰ 월별 근무기록", "📦 월말 재고확인", "👥 직원 정보"])
@@ -801,4 +807,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
