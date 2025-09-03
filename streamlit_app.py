@@ -252,19 +252,21 @@ def render_store_attendance(user_info, employees_df, attendance_detail_df, lock_
 
     selected_month_date = st.selectbox("관리할 년/월 선택", options=available_months, format_func=lambda d: d.strftime('%Y년 / %m월'))
     
+    # --- AttributeError BUGFIX: selected_month_date가 None일 경우를 대비 ---
     if selected_month_date is None:
         st.warning("선택할 수 있는 월이 없습니다."); return
         
     selected_month_str = selected_month_date.strftime('%Y-%m')
     start_date, end_date = selected_month_date, (selected_month_date + relativedelta(months=1)) - timedelta(days=1)
     
+    # --- TypeError BUGFIX: is_locked 계산 로직을 더 명확하게 수정 ---
     lock_status = "미요청"
-    if not locked_months_df.empty and '마감년월' in locked_months_df.columns and '상태' in locked_months_df.columns:
+    is_locked = False
+    if not locked_months_df.empty and all(c in locked_months_df for c in ['마감년월', '상태']):
         current_month_lock = locked_months_df[locked_months_df['마감년월'] == selected_month_str]
         if not current_month_lock.empty:
             lock_status = current_month_lock.iloc[0]['상태']
-
-    is_locked = lock_status in ["요청", "승인"]
+            is_locked = lock_status in ["요청", "승인"]
 
     month_records_df = pd.DataFrame()
     if not attendance_detail_df.empty and '근무일자' in attendance_detail_df.columns:
@@ -441,6 +443,11 @@ def render_store_inventory_check(user_info, inventory_master_df, inventory_log_d
         st.warning("조회 가능한 월이 없습니다. (모든 월이 정산 마감되었을 수 있습니다.)"); return
 
     selected_month_date = st.selectbox("재고를 확인할 년/월 선택", options=available_months, format_func=lambda d: d.strftime('%Y년 / %m월'))
+    
+    # --- AttributeError BUGFIX: selected_month_date가 None일 경우를 대비 ---
+    if selected_month_date is None:
+        st.warning("선택할 수 있는 월이 없습니다."); return
+        
     selected_month_str = selected_month_date.strftime('%Y-%m')
     
     cart_key = f"inventory_cart_{selected_month_str}"
@@ -965,3 +972,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
