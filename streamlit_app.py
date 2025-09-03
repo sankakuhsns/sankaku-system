@@ -545,9 +545,10 @@ def render_admin_settlement(sales_df, settlement_df, stores_df):
 
 def render_admin_analysis(sales_df, settlement_df, inventory_log_df, employees_df):
     st.subheader("📈 지점 분석")
+    if sales_df.empty:
+        st.warning("분석할 매출 데이터가 없습니다. 먼저 '정산 관리' 탭에서 매출 로그를 추가해주세요."); return
+
     all_stores = sales_df['지점명'].unique().tolist()
-    if not all_stores:
-        st.info("분석할 데이터가 없습니다."); return
     selected_store = st.selectbox("분석할 지점 선택", options=["전체"] + all_stores)
     if selected_store != "전체":
         sales_df = sales_df[sales_df['지점명'] == selected_store]
@@ -556,6 +557,7 @@ def render_admin_analysis(sales_df, settlement_df, inventory_log_df, employees_d
         employees_df = employees_df[employees_df['소속지점'] == selected_store]
     if sales_df.empty:
         st.warning(f"'{selected_store}'에 대한 데이터가 없습니다."); return
+        
     sales_df['월'] = pd.to_datetime(sales_df['매출일자']).dt.to_period('M')
     settlement_df['월'] = pd.to_datetime(settlement_df['정산일자']).dt.to_period('M')
     inventory_log_df['월'] = pd.to_datetime(inventory_log_df['평가년월']).dt.to_period('M')
@@ -569,11 +571,12 @@ def render_admin_analysis(sales_df, settlement_df, inventory_log_df, employees_d
     analysis_df['매출원가'] = analysis_df['기초재고'] + analysis_df.get('식자재', 0) - analysis_df['기말재고']
     analysis_df['매출총이익'] = analysis_df['매출'] - analysis_df['매출원가']
     analysis_df['영업이익'] = analysis_df['매출총이익'] - analysis_df.get('판관비', 0) - analysis_df.get('기타', 0)
+    
     st.markdown("#### **📊 월별 손익(P&L) 추이**")
     st.line_chart(analysis_df[['매출', '매출총이익', '영업이익']])
     st.markdown("#### **💰 비용 구조 분석 (최근 월)**")
-    latest_month_expenses = monthly_expenses.iloc[-1]
-    if not latest_month_expenses.empty:
+    if not monthly_expenses.empty:
+        latest_month_expenses = monthly_expenses.iloc[-1]
         st.bar_chart(latest_month_expenses)
 
 def render_admin_employee_management(employees_df, transfer_log_df, stores_df):
@@ -661,7 +664,7 @@ def main():
         st.sidebar.success(f"**{name}** ({role})님, 환영합니다.")
         st.sidebar.markdown("---")
         
-        if role != 'admin' and not cache['EMPLOYEE_MASTER'].empty:
+        if role == 'store' and not cache['EMPLOYEE_MASTER'].empty:
             check_health_cert_expiration(user_info, cache['EMPLOYEE_MASTER'])
         
         if st.sidebar.button("로그아웃"):
@@ -688,4 +691,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
