@@ -465,11 +465,22 @@ def render_store_inventory_check(user_info, inventory_master_df, inventory_log_d
     if '종류' not in inventory_master_df.columns:
         st.error("'재고마스터' 시트에 '종류' 열을 추가해주세요."); return
 
-    locked_months_df = lock_log_df[(lock_log_df['지점명'] == store_name) & (lock_log_df['마감유형'] == '재고')] if not lock_log_df.empty else pd.DataFrame()
-    
     month_options = [(date.today() - relativedelta(months=i)).replace(day=1) for i in range(4)]
-    available_months = [m for m in month_options if m.strftime('%Y-%m') not in locked_months_df[locked_months_df['상태'] == STATUS["LOCK_APPROVED"]].get('마감년월', pd.Series(dtype=str)).tolist()]
-    
+    available_months = month_options # 기본적으로 모든 월을 선택 가능하도록 설정
+
+    # --- [오류 수정] ---
+    # lock_log_df가 비어있지 않고, 필요한 컬럼이 모두 있는지 먼저 확인합니다.
+    required_lock_cols = ['지점명', '마감유형', '상태', '마감년월']
+    if not lock_log_df.empty and all(col in lock_log_df.columns for col in required_lock_cols):
+        locked_months_df = lock_log_df[
+            (lock_log_df['지점명'] == store_name) & 
+            (lock_log_df['마감유형'] == '재고') &
+            (lock_log_df['상태'] == STATUS["LOCK_APPROVED"])
+        ]
+        
+        locked_months_list = locked_months_df.get('마감년월', pd.Series(dtype=str)).tolist()
+        available_months = [m for m in month_options if m.strftime('%Y-%m') not in locked_months_list]
+
     if not available_months:
         st.warning("조회 가능한 월이 없습니다. (모든 월이 정산 마감되었을 수 있습니다.)"); return
 
@@ -1004,4 +1015,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
