@@ -11,7 +11,7 @@ import random
 import string
 
 # =============================================================================
-# 0. 기본 설정 및 상수 정의
+# 0. 기본 설정 및 상수 정의 (수정)
 # =============================================================================
 st.set_page_config(page_title="산카쿠 통합 관리 시스템", page_icon="🏢", layout="wide")
 
@@ -21,10 +21,10 @@ SHEET_NAMES = {
     "INVENTORY_MASTER": "재고마스터", "INVENTORY_DETAIL_LOG": "월말재고_상세로그",
     "SALES_LOG": "매출_로그", "SETTLEMENT_LOG": "일일정산_로그",
     "PERSONNEL_TRANSFER_LOG": "인사이동_로그", "SETTLEMENT_LOCK_LOG": "정산_마감_로그",
-    "DISPATCH_LOG": "파견_로그", "PERSONNEL_REQUEST_LOG": "인사요청_로그"
+    "DISPATCH_LOG": "파견_로그",
+    "PERSONNEL_REQUEST_LOG": "인사요청_로그" # <<< 이 부분이 추가되었습니다.
 }
 THEME = { "BORDER": "#e8e8ee", "PRIMARY": "#1C6758", "BG": "#f7f8fa", "TEXT": "#222" }
-
 # =============================================================================
 # 1. 구글 시트 연결 및 데이터 처리 함수
 # =============================================================================
@@ -742,7 +742,7 @@ def render_admin_settings(store_master_df):
     pass
 
 # =============================================================================
-# 5. 메인 실행 로직
+# 5. 메인 실행 로직 (수정)
 # =============================================================================
 def main():
     if 'logged_in' not in st.session_state: st.session_state['logged_in'] = False
@@ -784,8 +784,8 @@ def main():
             with admin_tabs[2]: render_admin_analysis(cache['SALES_LOG'], cache['SETTLEMENT_LOG'], cache['INVENTORY_LOG'], cache['EMPLOYEE_MASTER'])
             with admin_tabs[3]: render_admin_employee_management(cache['EMPLOYEE_MASTER'], cache['PERSONNEL_TRANSFER_LOG'], cache['STORE_MASTER'], cache['DISPATCH_LOG'])
             with admin_tabs[4]: render_admin_inventory(cache['INVENTORY_MASTER'], cache['INVENTORY_DETAIL_LOG'])
-            with admin_tabs[5]: render_admin_approval(cache['SETTLEMENT_LOCK_LOG'], cache['PERSONNEL_REQUEST_LOG'], cache['EMPLOYEE_MASTER'])
-            with admin_tabs[6]: render_admin_settings(cache['STORE_MASTER'])
+            with admin_tabs[5]: render_admin_approval(cache['SETTLEMENT_LOCK_LOG'], cache['PERSONNEL_REQUEST_LOG'], cache['EMPLOYEE_MASTER'], cache['STORE_MASTER'], cache['DISPATCH_LOG'])
+            with admin_tabs[6]: render_admin_settings(cache['STORE_MASTER'], cache['SETTLEMENT_LOCK_LOG'])
         else: # role == 'store'
             st.title(f"🏢 {name} 지점 관리 시스템")
             store_tabs = st.tabs(["⏰ 월별 근무기록", "📦 월말 재고확인", "👥 직원 정보"])
@@ -798,3 +798,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
