@@ -592,21 +592,17 @@ def render_admin_settlement(sales_df, settlement_df, stores_df):
     st.info("엑셀 파일로 매출 및 지출을 일괄 업로드할 수 있습니다.")
     
     tab1, tab2 = st.tabs(["📂 매출 정보 관리", "✍️ 지출 정보 관리"])
-
     with tab1:
         template_df = pd.DataFrame([{"매출일자": "2025-09-01", "지점명": "전대점", "매출유형": "카드매출", "금액": 100000, "요일": "월"}])
         output = io.BytesIO()
         template_df.to_excel(output, index=False, sheet_name='매출 업로드 양식')
         st.download_button("📥 매출 엑셀 양식 다운로드", data=output.getvalue(), file_name="매출_업로드_양식.xlsx")
-
         uploaded_file = st.file_uploader("매출 엑셀 파일 업로드", type=["xlsx"], key="sales_uploader")
         if uploaded_file:
             try:
                 upload_df = pd.read_excel(uploaded_file)
-                # 날짜 형식 통일
                 upload_df['매출일자'] = pd.to_datetime(upload_df['매출일자']).dt.strftime('%Y-%m-%d')
                 st.dataframe(upload_df, use_container_width=True)
-
                 if st.button("⬆️ 매출 데이터 저장하기", type="primary"):
                     required_cols = ["매출일자", "지점명", "매출유형", "금액", "요일"]
                     if not all(col in upload_df.columns for col in required_cols):
@@ -616,7 +612,6 @@ def render_admin_settlement(sales_df, settlement_df, stores_df):
                             st.toast(f"✅ 매출 데이터 {len(upload_df)}건이 성공적으로 저장되었습니다."); st.rerun()
             except Exception as e:
                 st.error(f"파일을 읽는 중 오류가 발생했습니다: {e}")
-
         if not sales_df.empty:
             min_date, max_date = sales_df['매출일자'].min(), sales_df['매출일자'].max()
             st.success(f"현재 **{len(sales_df)}**건의 매출 데이터가 저장되어 있습니다. (기간: {min_date} ~ {max_date})")
@@ -626,7 +621,6 @@ def render_admin_settlement(sales_df, settlement_df, stores_df):
         output = io.BytesIO()
         template_df.to_excel(output, index=False, sheet_name='지출 업로드 양식')
         st.download_button("📥 지출 엑셀 양식 다운로드", data=output.getvalue(), file_name="지출_업로드_양식.xlsx")
-        
         uploaded_file_exp = st.file_uploader("지출 엑셀 파일 업로드", type=["xlsx"], key="settlement_uploader")
         if uploaded_file_exp:
             try:
@@ -635,18 +629,15 @@ def render_admin_settlement(sales_df, settlement_df, stores_df):
                 upload_df_exp['입력일시'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 upload_df_exp['입력자'] = st.session_state['user_info']['지점ID']
                 st.dataframe(upload_df_exp, use_container_width=True)
-
                 if st.button("⬆️ 지출 데이터 저장하기", type="primary"):
                     if append_rows_and_clear_cache(SHEET_NAMES["SETTLEMENT_LOG"], upload_df_exp):
                         st.toast(f"✅ 지출 데이터 {len(upload_df_exp)}건이 성공적으로 저장되었습니다."); st.rerun()
-
             except Exception as e:
                 st.error(f"파일을 읽는 중 오류가 발생했습니다: {e}")
-
         if not settlement_df.empty:
             min_date, max_date = settlement_df['정산일자'].min(), settlement_df['정산일자'].max()
             st.success(f"현재 **{len(settlement_df)}**건의 지출 데이터가 저장되어 있습니다. (기간: {min_date} ~ {max_date})")
-            
+
 def render_admin_analysis(sales_df, settlement_df, inventory_log_df, employees_df):
     st.subheader("📈 지점 분석")
     if sales_df.empty:
@@ -755,10 +746,13 @@ def render_admin_approval(lock_log_df, personnel_request_log_df, employees_df, s
     st.subheader("✅ 승인 관리")
     st.info("지점에서 요청한 '정산 마감' 및 '인사 이동/파견' 건을 처리합니다.")
     
-    tab1, tab2 = st.tabs([f"정산 마감 요청 ({len(lock_log_df[lock_log_df['상태'] == '요청'])})", f"인사 이동/파견 요청 ({len(personnel_request_log_df[personnel_request_log_df['상태'] == '요청'])})"])
+    lock_count = len(lock_log_df[lock_log_df['상태'] == '요청']) if not lock_log_df.empty and '상태' in lock_log_df.columns else 0
+    personnel_count = len(personnel_request_log_df[personnel_request_log_df['상태'] == '요청']) if not personnel_request_log_df.empty and '상태' in personnel_request_log_df.columns else 0
+    
+    tab1, tab2 = st.tabs([f"정산 마감 요청 ({lock_count})", f"인사 이동/파견 요청 ({personnel_count})"])
     
     with tab1:
-        pending_locks = lock_log_df[lock_log_df['상태'] == '요청'].copy()
+        pending_locks = lock_log_df[lock_log_df['상태'] == '요청'].copy() if not lock_log_df.empty and '상태' in lock_log_df.columns else pd.DataFrame()
         if pending_locks.empty:
             st.info("처리 대기 중인 정산 마감 요청이 없습니다.")
         else:
@@ -783,7 +777,7 @@ def render_admin_approval(lock_log_df, personnel_request_log_df, employees_df, s
                         st.toast("정산 마감 요청이 반려되었습니다."); st.rerun()
 
     with tab2:
-        pending_personnel = personnel_request_log_df[personnel_request_log_df['상태'] == '요청'].copy()
+        pending_personnel = personnel_request_log_df[personnel_request_log_df['상태'] == '요청'].copy() if not personnel_request_log_df.empty and '상태' in personnel_request_log_df.columns else pd.DataFrame()
         if pending_personnel.empty:
             st.info("처리 대기 중인 인사 요청이 없습니다.")
         else:
@@ -796,7 +790,7 @@ def render_admin_approval(lock_log_df, personnel_request_log_df, employees_df, s
                 
                 if c1.button("✅ 승인", key=f"approve_personnel_{selected_req_index_p}", use_container_width=True, type="primary"):
                     # 인사 요청 승인 로직
-                    pass # (이 부분은 복잡하므로 별도 구현 필요)
+                    pass
                 
                 if c2.button("❌ 반려", key=f"reject_personnel_{selected_req_index_p}", use_container_width=True):
                     personnel_request_log_df.loc[selected_req_index_p, '상태'] = '반려'
@@ -805,7 +799,6 @@ def render_admin_approval(lock_log_df, personnel_request_log_df, employees_df, s
 
 def render_admin_settings(store_master_df, lock_log_df):
     st.subheader("⚙️ 시스템 관리")
-    
     with st.expander("🔒 **월별 정산 수동 마감** (요청 없이 즉시 마감)"):
         st.info("특정 월의 근무 또는 재고 정산을 관리자가 직접 마감 처리합니다. 마감된 데이터는 지점 관리자가 수정할 수 없게 됩니다.")
         c1, c2, c3 = st.columns(3)
@@ -827,9 +820,9 @@ def render_admin_settings(store_master_df, lock_log_df):
     if st.button("💾 계정 정보 저장", use_container_width=True):
         if update_sheet_and_clear_cache(SHEET_NAMES["STORE_MASTER"], edited_stores_df):
             st.toast("✅ 지점 계정 정보가 저장되었습니다."); st.rerun()
-
+            
 # =============================================================================
-# 5. 메인 실행 로직 (수정)
+# 5. 메인 실행 로직
 # =============================================================================
 def main():
     if 'logged_in' not in st.session_state: st.session_state['logged_in'] = False
@@ -885,5 +878,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
