@@ -200,7 +200,6 @@ def render_store_attendance(user_info, employees_df, attendance_detail_df, lock_
         """)
     store_name = user_info['지점명']
     
-    # --- BUGFIX: dispatch_log_df가 비어있거나 컬럼이 없는 경우를 대비한 방어 로직 ---
     dispatched_to_here = pd.DataFrame()
     required_dispatch_cols = ['파견지점', '파견시작일', '파견종료일', '직원ID']
     if not dispatch_log_df.empty and all(col in dispatch_log_df.columns for col in required_dispatch_cols):
@@ -213,10 +212,7 @@ def render_store_attendance(user_info, employees_df, attendance_detail_df, lock_
     
     if not dispatched_to_here.empty:
         dispatched_employees = employees_df[employees_df['직원ID'].isin(dispatched_to_here['직원ID'])]
-        store_employees_df = pd.concat([
-            employees_df[employees_df['소속지점'] == store_name], 
-            dispatched_employees
-        ]).drop_duplicates(subset=['직원ID'])
+        store_employees_df = pd.concat([employees_df[employees_df['소속지점'] == store_name], dispatched_employees]).drop_duplicates(subset=['직원ID'])
     else:
         store_employees_df = employees_df[employees_df['소속지점'] == store_name]
         
@@ -235,9 +231,9 @@ def render_store_attendance(user_info, employees_df, attendance_detail_df, lock_
     if not available_months:
         st.warning("조회 가능한 월이 없습니다. (모든 월이 정산 마감되었을 수 있습니다.)"); return
 
-    selected_month = st.selectbox("관리할 년/월 선택", options=available_months, format_func=lambda d: d.strftime('%Y년 / %m월'))
-    selected_month_str = selected_month.strftime('%Y-%m')
-    start_date, end_date = selected_month.date(), (selected_month + relativedelta(months=1)) - timedelta(days=1)
+    selected_month_date = st.selectbox("관리할 년/월 선택", options=available_months, format_func=lambda d: d.strftime('%Y년 / %m월'))
+    selected_month_str = selected_month_date.strftime('%Y-%m')
+    start_date, end_date = selected_month_date, (selected_month_date + relativedelta(months=1)) - timedelta(days=1)
     
     month_records_df = pd.DataFrame()
     if not attendance_detail_df.empty and '근무일자' in attendance_detail_df.columns:
@@ -272,10 +268,10 @@ def render_store_attendance(user_info, employees_df, attendance_detail_df, lock_
         st.markdown("---"); st.markdown("##### 🗓️ 근무 현황 요약")
         summary_pivot = month_records_df.pivot_table(index='직원이름', columns=pd.to_datetime(month_records_df['근무일자']).dt.day, values='총시간', aggfunc='sum').reindex(columns=range(1, end_date.day + 1))
         summary_pivot.columns = [f"{day}" for day in range(1, end_date.day + 1)]
-        kr_holidays = holidays.KR(years=selected_month.year)
+        kr_holidays = holidays.KR(years=selected_month_date.year)
         def style_day_columns(col):
             try:
-                d = date(selected_month.year, selected_month.month, int(col.name))
+                d = date(selected_month_date.year, selected_month_date.month, int(col.name))
                 if d in kr_holidays: return ['background-color: #ffcccc'] * len(col)
                 if d.weekday() == 6: return ['background-color: #ffdddd'] * len(col)
                 if d.weekday() == 5: return ['background-color: #ddeeff'] * len(col)
@@ -393,17 +389,17 @@ def render_store_inventory_check(user_info, inventory_master_df, inventory_log_d
         st.error("'재고마스터' 시트에 '종류' 열을 추가해주세요."); return
 
     locked_months = lock_log_df[
-        (lock_log_df['지점명'] == store_name) &
-        (lock_log_df['마감유형'] == '재고')
-    ]['마감년월'].tolist() if not inventory_log_df.empty else []
+        (lock_log_df['지점명'] == store_name) & (lock_log_df['마감유형'] == '재고')
+    ]['마감년월'].tolist() if not lock_log_df.empty else []
     
     month_options = [(date.today() - relativedelta(months=i)) for i in range(4)]
     available_months = [m for m in month_options if m.strftime('%Y-%m') not in locked_months]
+    
     if not available_months:
         st.warning("조회 가능한 월이 없습니다. (모든 월이 정산 마감되었을 수 있습니다.)"); return
 
-    selected_month = st.selectbox("재고를 확인할 년/월 선택", options=available_months, format_func=lambda d: d.strftime('%Y년 / %m월'))
-    selected_month_str = selected_month.strftime('%Y-%m')
+    selected_month_date = st.selectbox("재고를 확인할 년/월 선택", options=available_months, format_func=lambda d: d.strftime('%Y년 / %m월'))
+    selected_month_str = selected_month_date.strftime('%Y-%m')
     
     cart_key = f"inventory_cart_{selected_month_str}"
     if cart_key not in st.session_state:
@@ -452,7 +448,7 @@ def render_store_inventory_check(user_info, inventory_master_df, inventory_log_d
             if st.button("🗑️ 장바구니 비우기", use_container_width=True):
                 st.session_state[cart_key] = {}; st.rerun()
             
-            if st.button(f"💾 {selected_month.strftime('%Y년 %m월')} 재고 제출", type="primary", use_container_width=True):
+            if st.button(f"💾 {selected_month_date.strftime('%Y년 %m월')} 재고 제출", type="primary", use_container_width=True):
                 if not inventory_log_df.empty and '평가년월' in inventory_log_df.columns:
                     inventory_log_df['평가년월'] = pd.to_datetime(inventory_log_df['평가년월'], errors='coerce').dt.strftime('%Y-%m')
                 existing_indices = inventory_log_df[(inventory_log_df['평가년월'] == selected_month_str) & (inventory_log_df['지점명'] == store_name)].index if not inventory_log_df.empty else pd.Index([])
@@ -755,23 +751,14 @@ def main():
         if st.sidebar.button("로그아웃"):
             st.session_state.clear(); st.rerun()
         
-        # 탭 스타일 CSS
         st.markdown("""
             <style>
-                .stTabs [data-baseweb="tab-list"] {
-                    gap: 2px;
-                }
+                .stTabs [data-baseweb="tab-list"] { gap: 2px; }
                 .stTabs [data-baseweb="tab"] {
-                    height: 50px;
-                    white-space: pre-wrap;
-                    background-color: #F0F2F6;
-                    border-radius: 4px 4px 0px 0px;
-                    gap: 1px;
-                    padding: 10px;
+                    height: 50px; white-space: pre-wrap; background-color: #F0F2F6;
+                    border-radius: 4px 4px 0px 0px; gap: 1px; padding-top: 10px; padding-bottom: 10px;
                 }
-                .stTabs [aria-selected="true"] {
-                    background-color: #FFFFFF;
-                }
+                .stTabs [aria-selected="true"] { background-color: #FFFFFF; }
             </style>""", unsafe_allow_html=True)
 
         if role == 'admin':
@@ -795,4 +782,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
