@@ -272,18 +272,38 @@ def render_store_attendance(user_info, employees_df, attendance_detail_df, lock_
         st.markdown("---"); st.markdown("##### ✍️ 기본 스케줄 생성")
         st.info(f"**{selected_month_str}**에 대한 근무 기록이 없습니다. 아래 직원 정보를 확인 후 기본 스케줄을 생성해주세요.")
         st.dataframe(store_employees_df[['이름', '직책', '근무요일', '기본출근', '기본퇴근']], use_container_width=True, hide_index=True)
+        
         if st.button(f"🗓️ {selected_month_str} 기본 스케줄 생성하기", type="primary", use_container_width=True):
             new_records = []
             day_map = {'월': 0, '화': 1, '수': 2, '목': 3, '금': 4, '토': 5, '일': 6}
+            start_date = selected_month_date
+            end_date = (start_date + relativedelta(months=1)) - timedelta(days=1)
+
             for _, emp in store_employees_df.iterrows():
                 work_days = re.sub(r'[,\s]+', ' ', emp.get('근무요일', '')).split()
                 work_day_indices = {day_map[d] for d in work_days if d in day_map}
-                for dt in pd.date_range(selected_month_date, (selected_month_date + relativedelta(months=1)) - timedelta(days=1)):
+                
+                for dt in pd.date_range(start_date, end_date):
                     if dt.weekday() in work_day_indices:
                         uid = f"{dt.strftime('%y%m%d')}_{emp['이름']}_{int(datetime.now().timestamp())}_{len(new_records)}"
-                        new_records.append({"기록ID": f"manual_{uid}", "지점명": store_name, "근무일자": dt.strftime('%Y-%m-%d'), "직원이름": emp['이름'], "구분": "정상근무", "출근시간": emp.get('기본출근', '09:00'), "퇴근시간": emp.get('기본퇴근', '18:00'), "비고": ""})
+                        new_records.append({
+                            "기록ID": f"manual_{uid}", 
+                            "지점명": store_name, 
+                            "근무일자": dt.strftime('%Y-%m-%d'), 
+                            "직원이름": emp['이름'], 
+                            "구분": STATUS["ATTENDANCE_NORMAL"], 
+                            "출근시간": emp.get('기본출근', '09:00'), 
+                            "퇴근시간": emp.get('기본퇴근', '18:00'), 
+                            "비고": "기본 스케줄 생성"
+                        })
+            
+            # --- [핵심 변경] ---
+            # 전체 데이터를 읽고 덮어쓰는 대신, 새로 생성된 데이터만 '추가'합니다.
             if new_records and append_rows_and_clear_cache(SHEET_NAMES["ATTENDANCE_DETAIL"], pd.DataFrame(new_records)):
-                st.toast(f"✅ {selected_month_str}의 기본 스케줄이 생성되었습니다."); st.rerun()
+                st.toast(f"✅ {selected_month_str}의 기본 스케줄이 성공적으로 생성되었습니다."); st.rerun()
+            elif not new_records:
+                st.warning("스케줄을 생성할 직원이 없습니다.")
+
     else:
         def calculate_duration(row):
             try:
@@ -895,5 +915,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
