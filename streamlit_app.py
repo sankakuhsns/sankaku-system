@@ -19,9 +19,9 @@ SHEET_NAMES = {
     "EMPLOYEE_MASTER": "직원마스터",
     "ATTENDANCE_DETAIL": "근무기록_상세",
     "INVENTORY_MASTER": "재고마스터",
-    "INVENTORY_RECORDS": "월말재고_기록", # (월말재고_상세로그 -> 이름 변경, 월말재고_로그 삭제)
-    "ACCOUNTING_RECORDS": "회계_기록",   # (매출_로그 + 일일정산_로그 -> 통합)
-    "HR_RECORDS": "인사관리_기록",       # (인사이동/파견/요청_로그 -> 통합)
+    "INVENTORY_RECORDS": "월말재고_기록",   # (월말재고_로그 + 상세로그)
+    "ACCOUNTING_RECORDS": "회계_기록",     # (매출_로그 + 일일정산_로그)
+    "HR_RECORDS": "인사관리_기록",         # (인사이동/파견/요청_로그)
     "SETTLEMENT_LOCK_LOG": "정산_마감_로그"
 }
 
@@ -92,7 +92,7 @@ def find_and_delete_rows(sheet_name, id_column, ids_to_delete):
 
         rows_to_delete_indices = [
             i for i, row in enumerate(all_data[1:], start=2) 
-            if len(row) > id_col_index and row[id_col_index] in ids_to_delete_str
+            if len(row) > id_col_index and str(row[id_col_index]) in ids_to_delete_str
         ]
 
         if rows_to_delete_indices:
@@ -251,14 +251,18 @@ def login_screen():
                 if submitted:
                     users_df = load_data(SHEET_NAMES["STORE_MASTER"])
                     if not users_df.empty and "지점ID" in users_df.columns and "지점PW" in users_df.columns:
-                        user_info_df = users_df[(users_df['지점ID'] == username.strip()) & (users_df['지점PW'] == password)]
+                        user_info_df = users_df[
+                            (users_df['지점ID'] == username.strip()) & 
+                            (users_df['지점PW'] == password) &
+                            (users_df['활성'] == 'True') # 활성화된 계정만 로그인 허용
+                        ]
                         if not user_info_df.empty:
                             st.session_state['logged_in'] = True
                             st.session_state['user_info'] = user_info_df.iloc[0].to_dict()
                             st.session_state['data_cache'] = {}
                             st.rerun()
                         else:
-                            st.error("아이디 또는 비밀번호가 올바르지 않습니다.")
+                            st.error("아이디 또는 비밀번호가 올바르지 않거나 비활성화된 계정입니다.")
                     else:
                         st.error("사용자 정보(지점마스터)를 불러오는 데 실패했습니다.")
 
@@ -440,15 +444,13 @@ def render_store_attendance(user_info, employees_df, attendance_detail_df, lock_
     elif lock_status == STATUS["LOCK_REJECTED"]:
         st.error(f"❌ 마감 요청이 반려되었습니다. 기록 수정 후 다시 요청해주세요.")
         if st.button(f"🔒 {selected_month_str} 근무기록 재요청", use_container_width=True, type="primary"):
-            lock_log_df.loc[current_lock_request.index[0], '상태'] = STATUS["LOCK_REQUESTED"]
-            lock_log_df.loc[current_lock_request.index[0], '요청일시'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            # 재요청 로직: 상태와 요청일시만 업데이트
+            current_lock_request['상태'] = STATUS["LOCK_REQUESTED"]
+            current_lock_request['요청일시'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             
-            if find_and_delete_rows(SHEET_NAMES["SETTLEMENT_LOCK_LOG"], '마감년월', [selected_month_str]): # 임시방편. 고유ID 필요
-                 if append_rows_and_clear_cache(SHEET_NAMES["SETTLEMENT_LOCK_LOG"], lock_log_df[lock_log_df.index.isin(current_lock_request.index)]):
+            if find_and_delete_rows(SHEET_NAMES["SETTLEMENT_LOCK_LOG"], '마감년월', [selected_month_str]): # 임시 ID 대신 사용
+                 if append_rows_and_clear_cache(SHEET_NAMES["SETTLEMENT_LOCK_LOG"], current_lock_request):
                      st.toast("✅ 마감 재요청을 보냈습니다."); st.rerun()
-            # 참고: 위 로직은 완벽하지 않습니다. SETTLEMENT_LOCK_LOG에 고유 ID가 없으면 안전하게 행을 업데이트하기 어렵습니다.
-            # 지금은 해당 월의 모든 로그를 지우고 다시 쓰는 방식으로 동작하나, append_rows_and_clear_cache가 전체 DF를 받도록 수정 필요
-            st.warning("재요청 기능에 오류가 있습니다. 관리자에게 문의하세요.") # 임시 경고
 
     else:
         if st.button(f"🔒 {selected_month_str} 근무기록 마감 요청", use_container_width=True, type="primary"):
@@ -521,10 +523,9 @@ def render_store_inventory_check(user_info, inventory_master_df, inventory_recor
                 
                 if st.button(f"🚀 {selected_month_str} 재고 제출하기", type="primary", use_container_width=True):
                     cart_df_final = cart_df.copy()
-                    cart_df_final['평가년월'] = selected_month_date.strftime('%Y-%m-%d') # 제출일을 기준으로 기록
+                    cart_df_final['평가년월'] = date.today().strftime('%Y-%m-%d') # 제출일 기준으로 기록 (월초/월말 구분)
                     cart_df_final['지점명'] = store_name
                     
-                    # INVENTORY_LOG 시트가 삭제되었으므로 INVENTORY_RECORDS(구 상세로그)에만 저장
                     if append_rows_and_clear_cache(SHEET_NAMES["INVENTORY_RECORDS"], cart_df_final[['평가년월', '지점명', '품목명', '종류', '단위', '단가', '수량', '소계']]):
                         st.session_state[cart_key] = {}
                         st.toast(f"✅ {selected_month_str} 재고({total_value:,.0f}원)가 제출되었습니다."); st.rerun()
@@ -590,29 +591,36 @@ def render_store_employee_info(user_info, employees_df, hr_records_df, stores_df
                 
                 if find_and_delete_rows(SHEET_NAMES["EMPLOYEE_MASTER"], '직원ID', processed_df['직원ID'].tolist()):
                     rows_to_add = pd.concat([other_stores_df, processed_df], ignore_index=True)
-                    # 원본 컬럼 순서로 맞추기
-                    final_df = rows_to_add.reindex(columns=[col for col in employees_df.columns if col not in ['보건증만료일_dt', '년월']], fill_value='')
+                    # 원본 컬럼 순서로 맞추기 (전처리에 추가된 컬럼 제외)
+                    final_df_cols = [col for col in employees_df.columns if '_dt' not in col and '년월' not in col]
+                    rows_to_add = rows_to_add.reindex(columns=final_df_cols).fillna('')
                     
-                    # 전체 덮어쓰기 (직원 마스터는 전체 업데이트가 더 안전함)
-                    if append_rows_and_clear_cache(SHEET_NAMES["EMPLOYEE_MASTER"], final_df):
-                         st.toast("✅ 직원 정보가 성공적으로 업데이트되었습니다."); st.rerun()
+                    # 직원 마스터는 다른 지점 데이터도 포함하므로 전체 덮어쓰기가 필요 (append 대신 update 사용)
+                    spreadsheet = get_gspread_client().open_by_key(_get_sheet_key())
+                    worksheet = spreadsheet.worksheet(SHEET_NAMES["EMPLOYEE_MASTER"])
+                    worksheet.clear()
+                    df_str = rows_to_add.astype(str).replace('nan', '').replace('NaT', '')
+                    worksheet.update([df_str.columns.values.tolist()] + df_str.values.tolist(), value_input_option='USER_ENTERED')
+                    st.cache_data.clear()
+                    st.session_state.pop('data_cache', None)
+                    st.toast("✅ 직원 정보가 성공적으로 업데이트되었습니다."); st.rerun()
 
     with st.expander("✈️ **인사 이동 / 파견 요청**"):
         with st.form("personnel_request_form", clear_on_submit=True):
             req_emp_name = st.selectbox("요청 직원", options=store_employees_df['이름'].unique())
             req_type_display = st.radio("요청 유형", ["지점 이동", "파견"], horizontal=True)
-            req_type = STATUS["REQUEST_TYPE_TRANSFER"] if req_type_display == "지점 이동" else STATUS["REQUEST_TYPE_DISPATCH"]
+            req_type = STATUS["HR_TRANSFER"] if req_type_display == "지점 이동" else STATUS["HR_DISPATCH"]
             
             other_stores = stores_df[stores_df['지점명'] != store_name]['지점명'].unique().tolist()
             req_target_store = st.selectbox("요청 지점", options=other_stores)
             
             detail_text = ""
             new_record_data = {}
-            if req_type == STATUS["REQUEST_TYPE_DISPATCH"]:
+            if req_type == STATUS["HR_DISPATCH"]:
                 c1, c2 = st.columns(2)
                 start_date_req = c1.date_input("파견 시작일")
                 end_date_req = c2.date_input("파견 종료일")
-                detail_text = f"{req_target_store}으로 {start_date_req}부터 {end_date_req}까지 파견"
+                detail_text = f"{req_target_store}으로 {start_date_req}~{end_date_req} 파견"
                 new_record_data = {
                     "파견지점": req_target_store,
                     "파견시작일": start_date_req.strftime('%Y-%m-%d'),
@@ -621,7 +629,6 @@ def render_store_employee_info(user_info, employees_df, hr_records_df, stores_df
             else:
                 detail_text = f"{req_target_store}으로 소속 이동"
                 new_record_data = {"새지점": req_target_store}
-
             
             if st.form_submit_button("관리자에게 요청 보내기", type="primary"):
                 record_id = f"REQ_{datetime.now().strftime('%y%m%d%H%M%S')}_{req_emp_name}"
@@ -685,6 +692,8 @@ def render_admin_dashboard(cache):
         latest_month = inv_records['평가년월'].max()
         latest_inv_total = inv_records[inv_records['평가년월'] == latest_month]['소계'].sum()
         c2.metric(f"📦 전 지점 재고 자산 ({latest_month})", f"₩ {int(latest_inv_total):,}")
+    else:
+        c2.metric("📦 전 지점 재고 자산", "N/A")
 
     if "ACCOUNTING_RECORDS" in cache and not cache["ACCOUNTING_RECORDS"].empty:
         accounting_df = cache["ACCOUNTING_RECORDS"]
@@ -703,6 +712,9 @@ def render_admin_dashboard(cache):
         else:
             c3.metric(f"💰 금월 전체 매출", "N/A")
             c4.metric("🏆 금월 최고 매출 지점", "N/A")
+    else:
+        c3.metric(f"💰 금월 전체 매출", "N/A")
+        c4.metric("🏆 금월 최고 매출 지점", "N/A")
 
 def render_admin_settlement_management(cache):
     st.subheader("🧾 정산 관리")
@@ -727,7 +739,7 @@ def render_admin_settlement_management(cache):
                 try:
                     upload_df = pd.read_excel(uploaded_file)
                     upload_df['일자'] = pd.to_datetime(upload_df['일자']).dt.strftime('%Y-%m-%d')
-                    upload_df['구분'] = '매출' # 통합 시트용 구분 추가
+                    upload_df['구분'] = '매출'
                     upload_df['입력일시'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                     upload_df['입력자'] = st.session_state['user_info']['지점ID']
                     st.dataframe(upload_df, use_container_width=True)
@@ -747,7 +759,7 @@ def render_admin_settlement_management(cache):
                 try:
                     upload_df_exp = pd.read_excel(uploaded_file_exp)
                     upload_df_exp['일자'] = pd.to_datetime(upload_df_exp['일자']).dt.strftime('%Y-%m-%d')
-                    upload_df_exp['구분'] = '지출' # 통합 시트용 구분 추가
+                    upload_df_exp['구분'] = '지출'
                     upload_df_exp['입력일시'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                     upload_df_exp['입력자'] = st.session_state['user_info']['지점ID']
                     st.dataframe(upload_df_exp, use_container_width=True)
@@ -809,13 +821,13 @@ def render_admin_settlement_management(cache):
                     lock_log_df.loc[selected_req_index, '상태'] = STATUS["LOCK_APPROVED"]
                     lock_log_df.loc[selected_req_index, '처리일시'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                     lock_log_df.loc[selected_req_index, '실행관리자'] = admin_id
-                    if append_rows_and_clear_cache(SHEET_NAMES["SETTLEMENT_LOCK_LOG"], lock_log_df):
+                    if append_rows_and_clear_cache(SHEET_NAMES["SETTLEMENT_LOCK_LOG"], lock_log_df.loc[[selected_req_index]]):
                         st.toast("재고 정산 마감 요청이 승인되었습니다."); st.rerun()
                 if c2.button("❌ 재고 마감 반려", use_container_width=True):
                     lock_log_df.loc[selected_req_index, '상태'] = STATUS["LOCK_REJECTED"]
                     lock_log_df.loc[selected_req_index, '처리일시'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                     lock_log_df.loc[selected_req_index, '실행관리자'] = admin_id
-                    if append_rows_and_clear_cache(SHEET_NAMES["SETTLEMENT_LOCK_LOG"], lock_log_df):
+                    if append_rows_and_clear_cache(SHEET_NAMES["SETTLEMENT_LOCK_LOG"], lock_log_df.loc[[selected_req_index]]):
                         st.toast("재고 정산 마감 요청이 반려되었습니다."); st.rerun()
 
 def render_admin_employee_management(cache):
@@ -829,8 +841,9 @@ def render_admin_employee_management(cache):
 
     with tab1:
         st.markdown("###### ✈️ 인사 이동/파견 요청 처리")
+
         pending_personnel = pd.DataFrame()
-        required_cols = ['상태', '처리일시', '요청직원', '유형']
+        required_cols = ['상태', '처리일시', '요청직원', '유형', '기록ID']
         if not hr_records_df.empty and all(col in hr_records_df.columns for col in required_cols):
             pending_personnel = hr_records_df[(hr_records_df['상태'] == STATUS["LOCK_REQUESTED"]) & (hr_records_df['유형'] == STATUS["HR_REQUEST"])]
         
@@ -864,55 +877,46 @@ def render_admin_employee_management(cache):
                     else:
                         emp_id = emp_info.iloc[0]['직원ID']
                         current_store = emp_info.iloc[0]['소속지점']
-                        new_hr_record = {}
+                        new_hr_record_df = pd.DataFrame()
                         
                         if detail_text.startswith("이동지점:"):
                             target_store = detail_text.split(":")[1]
                             updated_employees = employees_df.copy()
-                            updated_employees.loc[updated_employees['이름'] == emp_name, '소속지점'] = target_store
+                            updated_employees.loc[updated_employees['직원ID'] == emp_id, '소속지점'] = target_store
                             
-                            new_hr_record = {
+                            new_hr_record_df = pd.DataFrame([{
                                 "기록ID": f"MOVE_{datetime.now().strftime('%y%m%d%H%M%S')}",
                                 "처리일시": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                                "유형": STATUS["HR_TRANSFER"],
-                                "요청직원": emp_name,
-                                "이전지점": current_store,
-                                "새지점": target_store,
-                                "상태": STATUS["LOCK_APPROVED"],
-                                "처리관리자": admin_id
-                            }
-                            # 직원 정보 업데이트
-                            if find_and_delete_rows(SHEET_NAMES["EMPLOYEE_MASTER"], '직원ID', [emp_id]):
-                                if append_rows_and_clear_cache(SHEET_NAMES["EMPLOYEE_MASTER"], updated_employees[updated_employees['직원ID'] == emp_id]):
-                                    success = True
+                                "유형": STATUS["HR_TRANSFER"], "요청직원": emp_name,
+                                "이전지점": current_store, "새지점": target_store,
+                                "상태": STATUS["LOCK_APPROVED"], "처리관리자": admin_id
+                            }])
+                            # 직원 정보 업데이트 (전체 덮어쓰기)
+                            if append_rows_and_clear_cache(SHEET_NAMES["EMPLOYEE_MASTER"], updated_employees):
+                                success = True
                         
                         elif detail_text.startswith("파견지점:"):
                             parts = detail_text.split(',')
                             target_store = parts[0].split(':')[1]
                             start_date = parts[1].split(':')[1]
                             end_date = parts[2].split(':')[1]
-                            new_hr_record = {
+                            new_hr_record_df = pd.DataFrame([{
                                 "기록ID": f"DISP_{datetime.now().strftime('%y%m%d%H%M%S')}",
                                 "처리일시": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                                "유형": STATUS["HR_DISPATCH"],
-                                "요청직원": emp_name,
-                                "파견지점": target_store,
-                                "파견시작일": start_date,
-                                "파견종료일": end_date,
-                                "상태": STATUS["LOCK_APPROVED"],
-                                "처리관리자": admin_id
-                            }
-                            success = True # 파견은 직원마스터를 수정하지 않고 로그만 추가
+                                "유형": STATUS["HR_DISPATCH"], "요청직원": emp_name,
+                                "파견지점": target_store, "파견시작일": start_date, "파견종료일": end_date,
+                                "상태": STATUS["LOCK_APPROVED"], "처리관리자": admin_id
+                            }])
+                            success = True # 파견은 로그만 추가
                         
                         if success:
-                            # 1. 요청 건 상태 변경
                             hr_records_df.loc[selected_req_index_p, '상태'] = STATUS["LOCK_APPROVED"]
                             hr_records_df.loc[selected_req_index_p, '처리관리자'] = admin_id
-                            # 2. 신규 처리 로그 추가
-                            all_hr_records_to_save = pd.concat([hr_records_df, pd.DataFrame([new_hr_record])], ignore_index=True)
                             
-                            if find_and_delete_rows(SHEET_NAMES["HR_RECORDS"], '기록ID', hr_records_df['기록ID'].tolist()):
-                                if append_rows_and_clear_cache(SHEET_NAMES["HR_RECORDS"], all_hr_records_to_save):
+                            # 기존 요청건 삭제 후, (업데이트된 요청건 + 신규 처리건) 추가
+                            if find_and_delete_rows(SHEET_NAMES["HR_RECORDS"], '기록ID', [request_details['기록ID']]):
+                                rows_to_add = pd.concat([hr_records_df[hr_records_df.index == selected_req_index_p], new_hr_record_df], ignore_index=True)
+                                if append_rows_and_clear_cache(SHEET_NAMES["HR_RECORDS"], rows_to_add):
                                     st.toast(f"✅ {emp_name} 직원의 요청이 승인 처리되었습니다."); st.rerun()
 
                 if c2.button("❌ 인사 요청 반려", key=f"reject_personnel_{selected_req_index_p}", use_container_width=True):
@@ -948,11 +952,25 @@ def render_admin_employee_management(cache):
                 processed_df = edited_df.copy()
                 for col in ['기본출근', '기본퇴근']:
                     processed_df[col] = processed_df[col].apply(lambda x: x.strftime('%H:%M') if isinstance(x, time) else '00:00')
-                
+
                 # API 최적화: 전체 덮어쓰기 대신 변경된 부분만 업데이트
+                other_stores_df = employees_df[~employees_df['직원ID'].isin(processed_df['직원ID'])]
+
                 if find_and_delete_rows(SHEET_NAMES["EMPLOYEE_MASTER"], '직원ID', processed_df['직원ID'].tolist()):
-                    if append_rows_and_clear_cache(SHEET_NAMES["EMPLOYEE_MASTER"], processed_df):
-                        st.toast("✅ 전체 직원 정보가 업데이트되었습니다."); st.rerun()
+                    rows_to_add = pd.concat([other_stores_df, processed_df], ignore_index=True)
+                    # 원본 컬럼 순서로 맞추기 (전처리에 추가된 컬럼 제외)
+                    final_df_cols = [col for col in employees_df.columns if '_dt' not in col and '년월' not in col]
+                    rows_to_add = rows_to_add.reindex(columns=final_df_cols).fillna('')
+
+                    # 직원 마스터는 전체 덮어쓰기 (전체 데이터 정합성 유지)
+                    spreadsheet = get_gspread_client().open_by_key(_get_sheet_key())
+                    worksheet = spreadsheet.worksheet(SHEET_NAMES["EMPLOYEE_MASTER"])
+                    worksheet.clear()
+                    df_str = rows_to_add.astype(str).replace('nan', '').replace('NaT', '')
+                    worksheet.update([df_str.columns.values.tolist()] + df_str.values.tolist(), value_input_option='USER_ENTERED')
+                    st.cache_data.clear()
+                    st.session_state.pop('data_cache', None)
+                    st.toast("✅ 전체 직원 정보가 업데이트되었습니다."); st.rerun()
     
     with tab2:
         st.markdown("###### 📊 지점별 근무 시간 분석")
@@ -1031,7 +1049,8 @@ def render_admin_system_settings(cache):
     with tab1:
         st.markdown("###### 지점 계정 정보")
         st.info("지점 정보를 수정하거나 새 지점을 추가한 후 '계정 정보 저장' 버튼을 누르세요.")
-        edited_stores_df = st.data_editor(store_master_df, num_rows="dynamic", use_container_width=True, key="admin_settings_editor")
+        edited_stores_df = st.data_editor(store_master_df, num_rows="dynamic", use_container_width=True, key="admin_settings_editor",
+            column_config={"지점ID": st.column_config.TextColumn(disabled=True)})
         if st.button("💾 계정 정보 저장", use_container_width=True):
             if find_and_delete_rows(SHEET_NAMES["STORE_MASTER"], '지점ID', edited_stores_df['지점ID'].tolist()):
                 if append_rows_and_clear_cache(SHEET_NAMES["STORE_MASTER"], edited_stores_df):
@@ -1040,7 +1059,8 @@ def render_admin_system_settings(cache):
     with tab2:
         st.markdown("###### 재고 품목 정보")
         st.info("이곳에서 품목을 추가, 수정, 삭제하면 모든 지점의 '월말 재고확인' 화면에 즉시 반영됩니다.")
-        edited_master = st.data_editor(inventory_master_df, num_rows="dynamic", use_container_width=True, key="master_inv_editor")
+        edited_master = st.data_editor(inventory_master_df, num_rows="dynamic", use_container_width=True, key="master_inv_editor",
+            column_config={"품목명": st.column_config.TextColumn(disabled=True)}) # 품목명은 고유해야 함
         if st.button("💾 재고마스터 저장", type="primary", use_container_width=True):
             if find_and_delete_rows(SHEET_NAMES["INVENTORY_MASTER"], '품목명', edited_master['품목명'].tolist()):
                 if append_rows_and_clear_cache(SHEET_NAMES["INVENTORY_MASTER"], edited_master):
