@@ -288,7 +288,7 @@ def render_data_page(data):
 
         location_list = data["LOCATIONS"]['사업장명'].tolist()
         upload_location = st.selectbox("2. 데이터를 귀속시킬 사업장을 선택하세요.", location_list)
-        uploaded_file = st.file_uploader("3. 해당 포맷의 엑셀 파일을 업로드하세요.", type=["xlsx", "xls"])
+        uploaded_file = st.file_uploader("3. 해당 포맷의 파일을 업로드하세요.", type=["xlsx", "xls", "csv"])
 
         if uploaded_file and upload_location and selected_format_name:
             st.markdown("---"); st.subheader("4. 데이터 처리 및 저장")
@@ -416,3 +416,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
