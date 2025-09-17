@@ -36,7 +36,13 @@ def get_spreadsheet_key():
 
 @st.cache_resource
 def get_gspread_client():
-    scopes = ["https.www.googleapis.com/auth/spreadsheets"]
+    # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+    # 오류 해결: 구글 드라이브 접근 권한(scope)을 추가하여 인증 문제를 해결합니다.
+    # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive.file"
+    ]
     creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
     return gspread.authorize(creds)
 
@@ -176,7 +182,7 @@ def calculate_pnl(transactions_df, inventory_df, accounts_df, selected_month, se
     return pnl_final, metrics
 
 # =============================================================================
-# 4. UI 렌더링 함수 (재구성됨)
+# 4. UI 렌더링 함수
 # =============================================================================
 def render_pnl_page(data):
     st.header("📅 월별 정산표")
@@ -340,7 +346,6 @@ def main():
         with st.spinner("데이터를 불러오는 중입니다..."):
             data = {name: load_data(sheet) for name, sheet in SHEET_NAMES.items()}
         
-        # 새로운 메뉴 구성
         menu = ["📅 월별 정산표", "✍️ 데이터 관리", "⚙️ 설정 관리"]
         choice = st.sidebar.radio("메뉴를 선택하세요.", menu)
         
@@ -350,7 +355,6 @@ def main():
         if st.sidebar.button("로그아웃"):
             st.session_state.clear(); st.rerun()
             
-        # 재구성된 메뉴에 따라 함수 호출
         if choice == "📅 월별 정산표":
             render_pnl_page(data)
         elif choice == "✍️ 데이터 관리":
