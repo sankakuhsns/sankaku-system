@@ -23,6 +23,65 @@ SHEET_NAMES = {
 }
 
 # =============================================================================
+# ★★★ 전용 파서 함수들 ★★★
+# =============================================================================
+
+def parse_okpos(df_raw):
+    """OKPOS 엑셀 파일의 구조에 맞춰 데이터를 파싱하는 전용 함수"""
+    out = []
+    # 데이터가 시작되는 행을 동적으로 찾기 (예: '일자' 헤더 기준)
+    try:
+        start_row = df_raw[df_raw.iloc[:, 0] == '일자'].index[0] + 1
+    except IndexError:
+        st.error("OKPOS 파일에서 '일자' 헤더를 찾을 수 없습니다. 파일 양식을 확인해주세요.")
+        return pd.DataFrame()
+
+    for i in range(start_row, df_raw.shape[0]):
+        date_cell = df_raw.iloc[i, 0]
+        # '소계'나 '합계' 같은 요약 행이 나오면 파싱 중단
+        if pd.isna(date_cell) or any(keyword in str(date_cell) for keyword in ['소계', '합계']):
+            break
+        
+        try:
+            date = pd.to_datetime(date_cell).strftime('%Y-%m-%d')
+            # OKPOS는 보통 일자별 매출 합계이므로, 내용은 '일매출' 등으로 통일
+            description = f"{pd.to_datetime(date_cell).strftime('%m월 %d일')} OKPOS 매출"
+            # 실제 매출액이 있는 컬럼 (예: 4번째 컬럼 '실매출액')
+            amount = pd.to_numeric(df_raw.iloc[i, 4], errors='coerce')
+            
+            if pd.notna(amount) and amount > 0:
+                out.append({'거래일자': date, '거래내용': description, '금액': amount})
+        except Exception:
+            continue
+            
+    return pd.DataFrame(out)
+
+def parse_shinhan_bank(df_raw):
+    """신한은행 지출내역 엑셀 파일의 구조에 맞춰 데이터를 파싱하는 전용 함수"""
+    out = []
+    # 실제 데이터가 있는 컬럼 이름 (예시)
+    DATE_COL = '거래일자'
+    DESC_COL = '적요'
+    AMOUNT_COL = '출금액'
+    
+    if not all(col in df_raw.columns for col in [DATE_COL, DESC_COL, AMOUNT_COL]):
+        st.error(f"신한은행 파일에 필수 컬럼({DATE_COL}, {DESC_COL}, {AMOUNT_COL})이 없습니다.")
+        return pd.DataFrame()
+
+    for _, row in df_raw.iterrows():
+        try:
+            date = pd.to_datetime(row[DATE_COL]).strftime('%Y-%m-%d')
+            description = str(row[DESC_COL])
+            amount = pd.to_numeric(row[AMOUNT_COL], errors='coerce')
+
+            if pd.notna(amount) and amount > 0:
+                out.append({'거래일자': date, '거래내용': description, '금액': amount})
+        except Exception:
+            continue
+            
+    return pd.DataFrame(out)
+
+# =============================================================================
 # 1. 구글 시트 연결 및 데이터 처리 함수
 # =============================================================================
 def get_spreadsheet_key():
@@ -51,8 +110,7 @@ def load_data(sheet_name):
                 df[col] = pd.to_numeric(df[col].str.replace(',', ''), errors='coerce').fillna(0)
         return df
     except gspread.exceptions.WorksheetNotFound:
-        st.error(f"'{sheet_name}' 시트를 찾을 수 없습니다. 시트가 생성되었는지, 이름이 정확한지 확인해주세요.")
-        return pd.DataFrame()
+        st.error(f"'{sheet_name}' 시트를 찾을 수 없습니다."); return pd.DataFrame()
     except Exception as e:
         st.error(f"'{sheet_name}' 시트 로딩 중 오류: {e}"); return pd.DataFrame()
 
@@ -69,7 +127,7 @@ def update_sheet(sheet_name, df):
         st.error(f"'{sheet_name}' 시트 업데이트 중 오류: {e}"); return False
 
 # =============================================================================
-# 2. 로그인 및 인증
+# 2. 로그인 및 인증, 3. 핵심 로직 (이전과 동일하여 생략)
 # =============================================================================
 def login_screen():
     st.title("🏢 통합 정산 관리 시스템")
@@ -94,9 +152,6 @@ def login_screen():
             else:
                 st.error("아이디 또는 비밀번호가 올바르지 않습니다.")
 
-# =============================================================================
-# 3. 핵심 로직 함수
-# =============================================================================
 def auto_categorize(df, rules_df):
     if rules_df.empty: return df
     categorized_df = df.copy()
@@ -160,7 +215,6 @@ def calculate_pnl(transactions_df, inventory_df, accounts_df, selected_month, se
     pnl_final = pd.concat([pnl_final, pd.DataFrame([{'항목': 'Ⅴ. 영업이익', '금액': operating_profit}])], ignore_index=True)
     metrics = {"총매출": sales, "매출총이익": gross_profit, "영업이익": operating_profit, "영업이익률": (operating_profit / sales) * 100 if sales > 0 else 0}
     
-    # 시각화를 위한 비용 데이터프레임 생성
     expense_chart_data = expenses.groupby('대분류')['금액'].sum().reset_index()
 
     return pnl_final, metrics, expense_chart_data
@@ -194,61 +248,50 @@ def render_pnl_page(data):
             
             st.dataframe(pnl_df.style.format({'금액': '{:,.0f}'}), use_container_width=True, hide_index=True)
 
-            # --- 개선 제안 4: 정산표 데이터 시각화 추가 ---
             if not expense_chart_data.empty:
                 st.subheader("비용 구성 시각화")
                 st.bar_chart(expense_chart_data, x='대분류', y='금액')
 
 def render_data_page(data):
     st.header("✍️ 데이터 관리")
+
     if data["LOCATIONS"].empty or data["ACCOUNTS"].empty or data["FORMATS"].empty:
         st.error("`설정 관리`에서 `사업장`, `계정과목`, `파일 포맷`을 먼저 등록해야 합니다."); st.stop()
-    
+
     tab1, tab2 = st.tabs(["거래내역 관리 (파일 업로드)", "월별재고 관리"])
     with tab1:
         st.subheader("파일 기반 거래내역 관리")
         
-        c1, c2 = st.columns([0.6, 0.4])
-        with c1:
-            format_list = data["FORMATS"]['포맷명'].tolist()
-            selected_format_name = st.selectbox("1. 처리할 파일 포맷을 선택하세요.", format_list)
-        
+        format_list = data["FORMATS"]['포맷명'].tolist()
+        selected_format_name = st.selectbox("1. 처리할 파일 포맷을 선택하세요.", format_list)
         selected_format = data["FORMATS"][data["FORMATS"]['포맷명'] == selected_format_name].iloc[0]
-
-        with c2:
-            st.write(" ")
-            # --- 기능 추가: 양식 다운로드 ---
-            output = io.BytesIO()
-            template_df = pd.DataFrame(columns=[selected_format['날짜컬럼명'], selected_format['내용컬럼명'], selected_format['금액컬럼명']])
-            template_df.to_excel(output, index=False, sheet_name='양식')
-            st.download_button(label=f"📄 '{selected_format_name}' 양식 다운로드", data=output.getvalue(), file_name=f"{selected_format_name}_양식.xlsx")
 
         location_list = data["LOCATIONS"]['사업장명'].tolist()
         upload_location = st.selectbox("2. 데이터를 귀속시킬 사업장을 선택하세요.", location_list)
-        uploaded_file = st.file_uploader("3. 해당 포맷의 엑셀 파일을 업로드하세요.", type=["xlsx"])
+        uploaded_file = st.file_uploader("3. 해당 포맷의 엑셀 파일을 업로드하세요.", type=["xlsx", "xls"])
 
         if uploaded_file and upload_location and selected_format_name:
             st.markdown("---"); st.subheader("4. 데이터 처리 및 저장")
             
             try:
-                df_raw = pd.read_excel(uploaded_file, engine='openpyxl')
-                
-                # --- 개선 제안 3: 파일 포맷 유효성 검사 강화 ---
-                required_cols_from_format = [selected_format['날짜컬럼명'], selected_format['내용컬럼명'], selected_format['금액컬럼명']]
-                missing_cols = [col for col in required_cols_from_format if col not in df_raw.columns]
-                if missing_cols:
-                    st.error(f"업로드한 파일에 필요한 컬럼이 없습니다: **{', '.join(missing_cols)}**")
-                    st.error(f"`파일 포맷 관리` 설정과 실제 파일의 헤더(첫 행)가 일치하는지 확인해주세요.")
-                    st.stop()
-                
+                df_raw = pd.read_excel(uploaded_file, engine='openpyxl', header=None) # 헤더 없이 원본 그대로 읽기
                 st.write("✅ 원본 파일 미리보기"); st.dataframe(df_raw.head())
                 
-                rename_map = {selected_format['날짜컬럼명']: '거래일자', selected_format['내용컬럼명']: '거래내용', selected_format['금액컬럼명']: '금액'}
-                df_processed = df_raw.rename(columns=rename_map)
+                # --- 전용 파서 호출 ---
+                df_parsed = pd.DataFrame()
+                if selected_format_name == "OKPOS 매출":
+                    df_parsed = parse_okpos(df_raw)
+                elif selected_format_name == "신한은행 지출":
+                    # 신한은행 파일은 헤더가 있을 수 있으므로, 헤더를 포함하여 다시 읽기
+                    uploaded_file.seek(0)
+                    df_raw_with_header = pd.read_excel(uploaded_file, engine='openpyxl')
+                    df_parsed = parse_shinhan_bank(df_raw_with_header)
                 
-                df_final = df_processed[['거래일자', '거래내용', '금액']].dropna(subset=['거래일자', '금액']).copy()
-                df_final.loc[:, '거래일자'] = pd.to_datetime(df_final['거래일자'], errors='coerce').dt.strftime('%Y-%m-%d')
-                df_final.loc[:, '금액'] = pd.to_numeric(df_final['금액'], errors='coerce')
+                if df_parsed.empty:
+                    st.warning("파일에서 처리할 데이터를 찾지 못했습니다. 파일 내용이나 양식을 확인해주세요."); st.stop()
+
+                # --- 표준 형식으로 변환 및 후처리 ---
+                df_final = df_parsed.copy()
                 df_final.loc[:, '사업장명'] = upload_location
                 df_final.loc[:, '구분'] = selected_format['데이터구분']
                 df_final.loc[:, '데이터소스'] = selected_format_name
@@ -256,7 +299,9 @@ def render_data_page(data):
                 df_final.loc[:, '계정ID'] = ''
                 df_final.loc[:, '거래ID'] = [str(uuid.uuid4()) for _ in range(len(df_final))]
                 
-                # --- 개선 제안 2: 중복 검사 결과 보여주기 ---
+                st.write("✅ 시스템 형식 변환 완료 (미리보기)"); st.dataframe(df_final.head())
+
+                # --- 조건부 처리: 비용 파일일 경우 중복 검사 ---
                 if selected_format['데이터구분'] == '비용':
                     existing_trans = data["TRANSACTIONS"]
                     existing_trans['unique_key'] = existing_trans['사업장명'] + existing_trans['거래일자'].astype(str) + existing_trans['거래내용'] + existing_trans['금액'].astype(str)
@@ -272,47 +317,45 @@ def render_data_page(data):
                 else:
                     df_to_process = df_final
 
+                # --- 자동 분류 및 수동 처리 ---
                 df_processed_final = auto_categorize(df_to_process, data["RULES"])
                 num_auto = len(df_processed_final[df_processed_final['처리상태'] == '자동분류'])
                 st.info(f"총 **{len(df_processed_final)}**건의 신규 거래 중 **{num_auto}**건이 자동으로 분류되었습니다.")
                 
-                # --- 개선 제안 1: 직관적인 계정과목 선택 ---
                 accounts_df = data["ACCOUNTS"]
-                account_options = [f"[{row['대분류']}/{row['소분류']}] ({row['계정ID']})" for index, row in accounts_df.iterrows()]
-                account_map_to_id = {f"[{row['대분류']}/{row['소분류']}] ({row['계정ID']})": row['계정ID'] for index, row in accounts_df.iterrows()}
+                account_options = [f"[{row['대분류']}/{row['소분류']}] ({row['계정ID']})" for _, row in accounts_df.iterrows()]
+                account_map_to_id = {f"[{row['대분류']}/{row['소분류']}] ({row['계정ID']})": row['계정ID'] for _, row in accounts_df.iterrows()}
                 account_map_from_id = {v: k for k, v in account_map_to_id.items()}
 
-                # 편집 전, ID를 표시용 이름으로 변환
                 df_processed_final['계정과목_선택'] = df_processed_final['계정ID'].map(account_map_from_id)
-
+                
+                st.write("미분류된 내역의 계정과목을 지정한 후 저장하세요.")
                 edited_final_display = st.data_editor(df_processed_final.drop(columns=['계정ID']), hide_index=True, use_container_width=True,
                     column_config={"계정과목_선택": st.column_config.SelectboxColumn("계정과목", options=account_options, required=True)})
 
                 if st.button("💾 위 내역 `통합거래_원장`에 최종 저장하기", type="primary"):
-                    # 저장 전, 표시용 이름에서 다시 ID로 변환
                     edited_final = edited_final_display.copy()
                     edited_final['계정ID'] = edited_final['계정과목_선택'].map(account_map_to_id)
                     
-                    if edited_final['계정ID'].isnull().any():
+                    if edited_final['계정ID'].isnull().any() or (edited_final['계정ID'] == '').any():
                         st.error("모든 항목의 `계정과목`을 선택해야 저장이 가능합니다.")
                     else:
                         edited_final['처리상태'] = edited_final.apply(lambda row: '수동확인' if row['처리상태'] == '미분류' else row['처리상태'], axis=1)
                         final_to_save = edited_final.drop(columns=['계정과목_선택'])
                         combined = pd.concat([data["TRANSACTIONS"], final_to_save], ignore_index=True)
                         if update_sheet(SHEET_NAMES["TRANSACTIONS"], combined):
-                            st.success("새로운 거래내역이 성공적으로 저장되었습니다."); st.rerun()
+                            st.success("저장되었습니다."); st.rerun()
 
             except Exception as e:
                 st.error(f"파일 처리 중 오류: {e}")
 
     with tab2:
-        # 월별재고 관리 로직
         st.subheader("월별재고 관리")
         edited_inv = st.data_editor(data["INVENTORY"], num_rows="dynamic", use_container_width=True, hide_index=True,
             column_config={"사업장명": st.column_config.SelectboxColumn("사업장명", options=data["LOCATIONS"]['사업장명'].tolist(), required=True)})
         if st.button("💾 월별재고 저장"):
             if update_sheet(SHEET_NAMES["INVENTORY"], edited_inv):
-                st.success("월별재고가 저장되었습니다."); st.rerun()
+                st.success("저장되었습니다."); st.rerun()
 
 def render_settings_page(data):
     st.header("⚙️ 설정 관리")
