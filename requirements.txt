@@ -1,7 +1,6 @@
 streamlit
-gspread
 pandas
+gspread
 google-auth-oauthlib
-python-dateutil
-holidays
-xlsxwriter
+google-auth-httplib2
+openpyxl
