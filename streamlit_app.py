@@ -22,35 +22,47 @@ SHEET_NAMES = {
     "FORMATS": "파일_포맷_마스터"
 }
 
+# --- OKPOS 파일 파싱을 위한 상수 정의 ---
+# ※ 실제 OKPOS 파일 양식에 맞게 이 숫자들을 조정해야 할 수 있습니다.
+OKPOS_DATA_START_ROW = 3  # 데이터 시작 행 (0부터 시작)
+OKPOS_COL_DATE = 0        # '일자' 컬럼 위치
+OKPOS_COL_DINE_IN_SALES = 4 # '홀매출' 컬럼 위치
+OKPOS_COL_TAKEOUT_SALES = 6 # '포장매출' 컬럼 위치
+OKPOS_COL_DELIVERY_SALES = 8# '배달매출' 컬럼 위치
+
 # =============================================================================
-# ★★★ 전용 파서 함수들 ★★★
+# ★★★ 전용 파서 함수들 (OKPOS 파서 업그레이드) ★★★
 # =============================================================================
 
 def parse_okpos(df_raw):
-    """OKPOS 엑셀 파일의 구조에 맞춰 데이터를 파싱하는 전용 함수"""
+    """
+    사용자가 제공한 상세 로직을 적용하여 OKPOS 엑셀 파일을 파싱하는 함수.
+    하나의 행에서 홀/포장/배달 매출을 각각 별도의 거래로 추출합니다.
+    """
     out = []
-    # 데이터가 시작되는 행을 동적으로 찾기 (예: '일자' 헤더 기준)
-    try:
-        start_row = df_raw[df_raw.iloc[:, 0] == '일자'].index[0] + 1
-    except IndexError:
-        st.error("OKPOS 파일에서 '일자' 헤더를 찾을 수 없습니다. 파일 양식을 확인해주세요.")
-        return pd.DataFrame()
-
-    for i in range(start_row, df_raw.shape[0]):
-        date_cell = df_raw.iloc[i, 0]
-        # '소계'나 '합계' 같은 요약 행이 나오면 파싱 중단
-        if pd.isna(date_cell) or any(keyword in str(date_cell) for keyword in ['소계', '합계']):
-            break
-        
+    for i in range(OKPOS_DATA_START_ROW, df_raw.shape[0]):
         try:
-            date = pd.to_datetime(date_cell).strftime('%Y-%m-%d')
-            # OKPOS는 보통 일자별 매출 합계이므로, 내용은 '일매출' 등으로 통일
-            description = f"{pd.to_datetime(date_cell).strftime('%m월 %d일')} OKPOS 매출"
-            # 실제 매출액이 있는 컬럼 (예: 4번째 컬럼 '실매출액')
-            amount = pd.to_numeric(df_raw.iloc[i, 4], errors='coerce')
+            date_cell = df_raw.iloc[i, OKPOS_COL_DATE]
+            if pd.isna(date_cell) or any(keyword in str(date_cell) for keyword in ['소계', '합계', '월계']):
+                break
+
+            # 엑셀의 숫자 형식 날짜와 일반 텍스트 날짜 모두 처리
+            if isinstance(date_cell, (int, float)):
+                date = (pd.to_datetime('1899-12-30') + pd.to_timedelta(date_cell, 'D')).strftime('%Y-%m-%d')
+            else:
+                cleaned_date_str = str(date_cell).replace("소계:", "").strip()
+                date = pd.to_datetime(cleaned_date_str).strftime('%Y-%m-%d')
             
-            if pd.notna(amount) and amount > 0:
-                out.append({'거래일자': date, '거래내용': description, '금액': amount})
+            홀매출 = pd.to_numeric(df_raw.iloc[i, OKPOS_COL_DINE_IN_SALES], errors='coerce')
+            포장매출 = pd.to_numeric(df_raw.iloc[i, OKPOS_COL_TAKEOUT_SALES], errors='coerce')
+            배달매출 = pd.to_numeric(df_raw.iloc[i, OKPOS_COL_DELIVERY_SALES], errors='coerce')
+            
+            if pd.notna(홀매출) and 홀매출 != 0:
+                out.append({'거래일자': date, '거래내용': 'OKPOS 홀매출', '금액': 홀매출})
+            if pd.notna(포장매출) and 포장매출 != 0:
+                out.append({'거래일자': date, '거래내용': 'OKPOS 포장매출', '금액': 포장매출})
+            if pd.notna(배달매출) and 배달매출 != 0:
+                out.append({'거래일자': date, '거래내용': 'OKPOS 배달매출', '금액': 배달매출})
         except Exception:
             continue
             
@@ -59,10 +71,7 @@ def parse_okpos(df_raw):
 def parse_shinhan_bank(df_raw):
     """신한은행 지출내역 엑셀 파일의 구조에 맞춰 데이터를 파싱하는 전용 함수"""
     out = []
-    # 실제 데이터가 있는 컬럼 이름 (예시)
-    DATE_COL = '거래일자'
-    DESC_COL = '적요'
-    AMOUNT_COL = '출금액'
+    DATE_COL, DESC_COL, AMOUNT_COL = '거래일자', '적요', '출금액'
     
     if not all(col in df_raw.columns for col in [DATE_COL, DESC_COL, AMOUNT_COL]):
         st.error(f"신한은행 파일에 필수 컬럼({DATE_COL}, {DESC_COL}, {AMOUNT_COL})이 없습니다.")
@@ -73,7 +82,6 @@ def parse_shinhan_bank(df_raw):
             date = pd.to_datetime(row[DATE_COL]).strftime('%Y-%m-%d')
             description = str(row[DESC_COL])
             amount = pd.to_numeric(row[AMOUNT_COL], errors='coerce')
-
             if pd.notna(amount) and amount > 0:
                 out.append({'거래일자': date, '거래내용': description, '금액': amount})
         except Exception:
@@ -82,7 +90,7 @@ def parse_shinhan_bank(df_raw):
     return pd.DataFrame(out)
 
 # =============================================================================
-# 1. 구글 시트 연결 및 데이터 처리 함수
+# 1. 구글 시트 연결 및 데이터 처리 함수 (이하 동일)
 # =============================================================================
 def get_spreadsheet_key():
     try: return st.secrets["gcp_service_account"]["SPREADSHEET_KEY"]
@@ -127,7 +135,7 @@ def update_sheet(sheet_name, df):
         st.error(f"'{sheet_name}' 시트 업데이트 중 오류: {e}"); return False
 
 # =============================================================================
-# 2. 로그인 및 인증, 3. 핵심 로직 (이전과 동일하여 생략)
+# 2. 로그인, 3. 핵심 로직 (이하 동일)
 # =============================================================================
 def login_screen():
     st.title("🏢 통합 정산 관리 시스템")
@@ -274,23 +282,25 @@ def render_data_page(data):
             st.markdown("---"); st.subheader("4. 데이터 처리 및 저장")
             
             try:
-                df_raw = pd.read_excel(uploaded_file, engine='openpyxl', header=None) # 헤더 없이 원본 그대로 읽기
+                # 파서 유형에 따라 다르게 파일 읽기
+                if selected_format_name == "OKPOS 매출":
+                    df_raw = pd.read_excel(uploaded_file, engine='openpyxl', header=None)
+                else: # 신한은행 등 헤더가 있는 파일
+                    df_raw = pd.read_excel(uploaded_file, engine='openpyxl')
+                
                 st.write("✅ 원본 파일 미리보기"); st.dataframe(df_raw.head())
                 
-                # --- 전용 파서 호출 ---
+                # 전용 파서 호출
                 df_parsed = pd.DataFrame()
                 if selected_format_name == "OKPOS 매출":
                     df_parsed = parse_okpos(df_raw)
                 elif selected_format_name == "신한은행 지출":
-                    # 신한은행 파일은 헤더가 있을 수 있으므로, 헤더를 포함하여 다시 읽기
-                    uploaded_file.seek(0)
-                    df_raw_with_header = pd.read_excel(uploaded_file, engine='openpyxl')
-                    df_parsed = parse_shinhan_bank(df_raw_with_header)
+                    df_parsed = parse_shinhan_bank(df_raw)
                 
                 if df_parsed.empty:
                     st.warning("파일에서 처리할 데이터를 찾지 못했습니다. 파일 내용이나 양식을 확인해주세요."); st.stop()
 
-                # --- 표준 형식으로 변환 및 후처리 ---
+                # 표준 형식 변환 및 후처리
                 df_final = df_parsed.copy()
                 df_final.loc[:, '사업장명'] = upload_location
                 df_final.loc[:, '구분'] = selected_format['데이터구분']
@@ -300,24 +310,22 @@ def render_data_page(data):
                 df_final.loc[:, '거래ID'] = [str(uuid.uuid4()) for _ in range(len(df_final))]
                 
                 st.write("✅ 시스템 형식 변환 완료 (미리보기)"); st.dataframe(df_final.head())
-
-                # --- 조건부 처리: 비용 파일일 경우 중복 검사 ---
+                
                 if selected_format['데이터구분'] == '비용':
+                    # ... (중복 검사 로직) ...
                     existing_trans = data["TRANSACTIONS"]
                     existing_trans['unique_key'] = existing_trans['사업장명'] + existing_trans['거래일자'].astype(str) + existing_trans['거래내용'] + existing_trans['금액'].astype(str)
                     df_final['unique_key'] = df_final['사업장명'] + df_final['거래일자'].astype(str) + df_final['거래내용'] + df_final['금액'].astype(str)
-                    
                     duplicates = df_final[df_final['unique_key'].isin(existing_trans['unique_key'])]
                     new_transactions = df_final[~df_final['unique_key'].isin(existing_trans['unique_key'])].drop(columns=['unique_key'])
-                    
                     if not duplicates.empty:
                         with st.expander(f"⚠️ {len(duplicates)}건의 중복 의심 거래가 제외되었습니다. (펼쳐서 확인)"):
                             st.dataframe(duplicates[['거래일자', '거래내용', '금액']])
                     df_to_process = new_transactions
                 else:
                     df_to_process = df_final
-
-                # --- 자동 분류 및 수동 처리 ---
+                
+                # ... (자동 분류 및 수동 처리) ...
                 df_processed_final = auto_categorize(df_to_process, data["RULES"])
                 num_auto = len(df_processed_final[df_processed_final['처리상태'] == '자동분류'])
                 st.info(f"총 **{len(df_processed_final)}**건의 신규 거래 중 **{num_auto}**건이 자동으로 분류되었습니다.")
@@ -326,7 +334,6 @@ def render_data_page(data):
                 account_options = [f"[{row['대분류']}/{row['소분류']}] ({row['계정ID']})" for _, row in accounts_df.iterrows()]
                 account_map_to_id = {f"[{row['대분류']}/{row['소분류']}] ({row['계정ID']})": row['계정ID'] for _, row in accounts_df.iterrows()}
                 account_map_from_id = {v: k for k, v in account_map_to_id.items()}
-
                 df_processed_final['계정과목_선택'] = df_processed_final['계정ID'].map(account_map_from_id)
                 
                 st.write("미분류된 내역의 계정과목을 지정한 후 저장하세요.")
