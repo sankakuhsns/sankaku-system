@@ -47,10 +47,8 @@ def load_data(sheet_name):
         spreadsheet = get_gspread_client().open_by_key(spreadsheet_key)
         worksheet = spreadsheet.worksheet(sheet_name)
         df = pd.DataFrame(worksheet.get_all_records())
-        # 모든 컬럼을 문자열로 우선 변환하여 공백제거
         for col in df.columns:
             df[col] = df[col].astype(str).str.strip()
-        # 숫자 변환이 필요한 컬럼 지정
         numeric_cols = ['금액', '기말재고액']
         for col in numeric_cols:
             if col in df.columns:
@@ -86,12 +84,18 @@ def login_screen():
     if settings_df.empty:
         st.error("`시스템_설정` 시트가 비어있습니다. 로그인 정보를 입력해주세요.")
         st.stop()
-    try:
-        admin_id = settings_df[settings_df['Key'] == 'ADMIN_ID']['Value'].iloc[0]
-        admin_pw = settings_df[settings_df['Key'] == 'ADMIN_PW']['Value'].iloc[0]
-    except (IndexError, KeyError):
-        st.error("`시스템_설정` 시트에 ADMIN_ID 또는 ADMIN_PW Key가 없습니다.")
+
+    # ★ 방어 로직: Key/Value 데이터가 없을 때를 대비
+    admin_id_row = settings_df[settings_df['Key'] == 'ADMIN_ID']
+    admin_pw_row = settings_df[settings_df['Key'] == 'ADMIN_PW']
+
+    if admin_id_row.empty or admin_pw_row.empty:
+        st.error("`시스템_설정` 시트에 ADMIN_ID 또는 ADMIN_PW Key에 대한 값이 없습니다.")
+        st.info("Key 컬럼에 ADMIN_ID, ADMIN_PW를 추가하고 Value 컬럼에 값을 입력해주세요.")
         st.stop()
+
+    admin_id = admin_id_row['Value'].iloc[0]
+    admin_pw = admin_pw_row['Value'].iloc[0]
 
     with st.form("login_form"):
         username = st.text_input("아이디")
@@ -122,39 +126,40 @@ def auto_categorize(df, rules_df):
     return categorized_df
 
 def calculate_pnl(transactions_df, inventory_df, accounts_df, selected_month, selected_location):
-    """선택된 월과 사업장의 손익계산서(P&L) 데이터프레임 생성"""
-    # 1. 데이터 필터링
     if selected_location != "전체":
         transactions_df = transactions_df[transactions_df['사업장명'] == selected_location]
         inventory_df = inventory_df[inventory_df['사업장명'] == selected_location]
 
+    # ★ 방어 로직: '거래일자' 컬럼이 없으면 에러 대신 빈 DF 반환
+    if '거래일자' not in transactions_df.columns:
+        return pd.DataFrame(), {}
+        
     transactions_df['거래일자'] = pd.to_datetime(transactions_df['거래일자'])
     month_trans = transactions_df[transactions_df['거래일자'].dt.strftime('%Y-%m') == selected_month].copy()
 
-    if month_trans.empty:
-        return pd.DataFrame(), {}
+    if month_trans.empty: return pd.DataFrame(), {}
 
-    # 2. 계정과목 정보 병합 및 집계
     pnl_data = pd.merge(month_trans, accounts_df, on='계정ID', how='left')
     pnl_summary = pnl_data.groupby(['대분류', '소분류'])['금액'].sum().reset_index()
-
-    # 3. 손익계산서 항목 계산
     sales = pnl_summary[pnl_summary['대분류'].str.contains('매출', na=False)]['금액'].sum()
     cogs_purchase = pnl_summary[pnl_summary['대분류'].str.contains('원가', na=False)]['금액'].sum()
 
-    # 4. 재고액 계산
     prev_month = (datetime.strptime(selected_month + '-01', '%Y-%m-%d') - relativedelta(months=1)).strftime('%Y-%m')
-    begin_inv = inventory_df[inventory_df['기준년월'] == prev_month]['기말재고액'].sum()
-    end_inv = inventory_df[inventory_df['기준년월'] == selected_month]['기말재고액'].sum()
+    
+    # ★ 방어 로직: 재고 데이터가 없을 경우 0으로 처리
+    begin_inv_data = inventory_df[inventory_df['기준년월'] == prev_month]
+    begin_inv = begin_inv_data['기말재고액'].sum() if not begin_inv_data.empty else 0
+    
+    end_inv_data = inventory_df[inventory_df['기준년월'] == selected_month]
+    end_inv = end_inv_data['기말재고액'].sum() if not end_inv_data.empty else 0
+    
     cogs = begin_inv + cogs_purchase - end_inv
     gross_profit = sales - cogs
     
-    # 5. 비용 집계 및 영업이익 계산
     expenses = pnl_summary[~pnl_summary['대분류'].str.contains('매출|원가', na=False)]
     total_expenses = expenses['금액'].sum()
     operating_profit = gross_profit - total_expenses
 
-    # 6. 최종 P&L 데이터프레임 구성
     pnl_final = pd.DataFrame([{'항목': 'Ⅰ. 총매출', '금액': sales}])
     pnl_final = pd.concat([pnl_final, pd.DataFrame([{'항목': 'Ⅱ. 매출원가', '금액': cogs}])], ignore_index=True)
     pnl_final = pd.concat([pnl_final, pd.DataFrame([{'항목': 'Ⅲ. 매출총이익', '금액': gross_profit}])], ignore_index=True)
@@ -174,7 +179,6 @@ def calculate_pnl(transactions_df, inventory_df, accounts_df, selected_month, se
     metrics = {"총매출": sales, "매출총이익": gross_profit, "영업이익": operating_profit, "영업이익률": (operating_profit / sales) * 100 if sales > 0 else 0}
     return pnl_final, metrics
 
-
 # =============================================================================
 # 4. UI 렌더링 함수
 # =============================================================================
@@ -182,7 +186,14 @@ def render_dashboard(data):
     st.header("📊 월별 손익(P&L) 대시보드")
     
     col1, col2 = st.columns(2)
-    location_list = ["전체"] + data["LOCATIONS"]['사업장명'].tolist()
+
+    # ★ 방어 로직: 사업장 마스터가 비어있을 경우 대비
+    if not data["LOCATIONS"].empty and '사업장명' in data["LOCATIONS"].columns:
+        location_list = ["전체"] + data["LOCATIONS"]['사업장명'].tolist()
+    else:
+        location_list = ["전체"]
+        st.sidebar.warning("`사업장_마스터`에 데이터를 추가해주세요.")
+
     selected_location = col1.selectbox("사업장 선택", location_list)
     
     today = datetime.now()
@@ -204,11 +215,16 @@ def render_dashboard(data):
 def render_transaction_manager(data):
     st.header("🗂️ 거래내역 관리")
     
+    # ★ 방어 로직: 마스터 데이터가 있어야 업로드/편집 가능
+    if data["LOCATIONS"].empty or data["ACCOUNTS"].empty:
+        st.error("`사업장_마스터`와 `계정과목_마스터`에 데이터가 먼저 입력되어야 합니다.")
+        st.stop()
+
     with st.expander("📥 신규 거래내역(엑셀/CSV) 일괄 업로드"):
         location_list = data["LOCATIONS"]['사업장명'].tolist()
         upload_location = st.selectbox("어느 사업장의 파일인가요?", location_list, key="upload_loc")
         uploaded_file = st.file_uploader("OKPOS, 은행 등 거래내역 파일을 업로드하세요.", type=["csv", "xlsx"])
-
+        # (이하 업로드 로직은 이전과 동일)
         if uploaded_file and upload_location:
             try:
                 df_raw = pd.read_excel(uploaded_file, engine='openpyxl') if uploaded_file.name.endswith('xlsx') else pd.read_csv(uploaded_file, encoding='cp949')
@@ -221,12 +237,10 @@ def render_transaction_manager(data):
                 type_col = c3.selectbox("구분(수익/비용) 컬럼", [None] + list(df_raw.columns))
                 amount_col = c4.selectbox("금액 컬럼", df_raw.columns)
                 
-                # 데이터 정제
                 df_processed = df_raw[[date_col, desc_col, amount_col]].copy()
                 df_processed.columns = ['거래일자', '거래내용', '금액']
-                df_processed['구분'] = df_raw[type_col] if type_col else '비용' # 구분 컬럼 없으면 '비용'으로 간주
+                df_processed['구분'] = df_raw[type_col] if type_col else '비용'
                 
-                # 시스템 형식에 맞게 변환
                 df_final = df_processed.dropna(subset=['거래일자', '금액']).copy()
                 df_final['거래일자'] = pd.to_datetime(df_final['거래일자'], errors='coerce').dt.strftime('%Y-%m-%d')
                 df_final['금액'] = pd.to_numeric(df_final['금액'], errors='coerce')
@@ -245,11 +259,11 @@ def render_transaction_manager(data):
             except Exception as e:
                 st.error(f"파일 처리 중 오류: {e}")
 
+
     st.markdown("---")
     st.subheader("📋 전체 거래내역 편집 및 수기 입력")
     
-    # 필터
-    f1, f2, f3 = st.columns(3)
+    f1, f2 = st.columns(2)
     filter_loc = f1.selectbox("사업장 필터", ["전체"] + data["LOCATIONS"]["사업장명"].tolist())
     filter_status = f2.selectbox("처리상태 필터", ["전체", "미분류", "자동분류", "수동확인"])
     
@@ -257,7 +271,6 @@ def render_transaction_manager(data):
     if filter_loc != "전체": df_editor = df_editor[df_editor['사업장명'] == filter_loc]
     if filter_status != "전체": df_editor = df_editor[df_editor['처리상태'] == filter_status]
     
-    # Data Editor
     edited_df = st.data_editor(df_editor, num_rows="dynamic", use_container_width=True, hide_index=True,
         column_config={
             "거래ID": st.column_config.TextColumn(disabled=True),
@@ -267,18 +280,12 @@ def render_transaction_manager(data):
         })
 
     if st.button("💾 변경사항 저장", type="primary"):
-        # 원본 데이터와 비교하여 변경/추가/삭제된 행 식별
-        original_ids = set(data["TRANSACTIONS"]['거래ID'])
-        edited_ids = set(edited_df['거래ID'].dropna())
-        
-        # 새로 추가된 행에 ID 및 기본값 할당
         new_rows_mask = edited_df['거래ID'].isnull() | (edited_df['거래ID'] == '')
         for i in edited_df[new_rows_mask].index:
             edited_df.loc[i, '거래ID'] = str(uuid.uuid4())
             if pd.isna(edited_df.loc[i, '거래일자']): edited_df.loc[i, '거래일자'] = datetime.now().strftime('%Y-%m-%d')
-            if pd.isna(edited_df.loc[i, '처리상태']): edited_df.loc[i, '처리상태'] = '수동확인'
+            if pd.isna(edited_df.loc[i, '처리상태']) or edited_df.loc[i, '처리상태'] == '': edited_df.loc[i, '처리상태'] = '수동확인'
         
-        # 시트 업데이트
         if update_sheet(SHEET_NAMES["TRANSACTIONS"], edited_df):
             st.success("거래내역이 업데이트되었습니다."); st.rerun()
 
@@ -288,26 +295,22 @@ def render_settings(data):
     tab1, tab2, tab3, tab4 = st.tabs(["🏢 사업장 관리", "📚 계정과목 관리", "🤖 자동분류 규칙", "📦 월별재고 관리"])
 
     with tab1:
-        st.info("관리할 지점, 공장 등 사업장 목록을 관리합니다.")
         edited_locs = st.data_editor(data["LOCATIONS"], num_rows="dynamic", use_container_width=True, hide_index=True)
         if st.button("사업장 정보 저장"):
             if update_sheet(SHEET_NAMES["LOCATIONS"], edited_locs):
                 st.success("사업장 정보가 저장되었습니다."); st.rerun()
     with tab2:
-        st.info("정산표의 분류 기준이 되는 계정과목을 관리합니다.")
         edited_accs = st.data_editor(data["ACCOUNTS"], num_rows="dynamic", use_container_width=True, hide_index=True)
         if st.button("계정과목 저장"):
             if update_sheet(SHEET_NAMES["ACCOUNTS"], edited_accs):
                 st.success("계정과목이 저장되었습니다."); st.rerun()
     with tab3:
-        st.info("거래내용의 키워드를 기반으로 계정과목을 자동 분류하는 규칙을 관리합니다.")
         edited_rules = st.data_editor(data["RULES"], num_rows="dynamic", use_container_width=True, hide_index=True,
             column_config={"계정ID": st.column_config.SelectboxColumn("계정ID", options=data["ACCOUNTS"]['계정ID'].tolist(), required=True)})
         if st.button("자동분류 규칙 저장"):
             if update_sheet(SHEET_NAMES["RULES"], edited_rules):
                 st.success("자동분류 규칙이 저장되었습니다."); st.rerun()
     with tab4:
-        st.info("매출원가 계산을 위해 사업장별 월말 재고액을 입력합니다.")
         edited_inv = st.data_editor(data["INVENTORY"], num_rows="dynamic", use_container_width=True, hide_index=True,
             column_config={"사업장명": st.column_config.SelectboxColumn("사업장명", options=data["LOCATIONS"]['사업장명'].tolist(), required=True)})
         if st.button("월별재고 저장"):
