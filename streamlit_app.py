@@ -17,34 +17,30 @@ SHEET_NAMES = {
     "ACCOUNTS": "계정과목",
     "TRANSACTIONS": "통합거래",
     "INVENTORY": "월별재고",
-    "RULES": "자동분류_규칙"  # 자동분류 규칙 시트 추가
+    "RULES": "자동분류_규칙"
 }
 
 # =============================================================================
-# 1. 구글 시트 연결 및 데이터 처리 함수
+# 1. 구글 시트 연결 및 데이터 처리 함수 (★최초 코드로 복원된 부분)
 # =============================================================================
-def get_spreadsheet_key():
-    """secrets.toml의 다양한 Key 입력 방식(대소문자 등)을 모두 지원"""
-    secrets = st.secrets
-    # 1순위: [gcp_service_account] 내 소문자 key
-    if "gcp_service_account" in secrets and "spreadsheet_key" in secrets["gcp_service_account"]:
-        return secrets["gcp_service_account"]["spreadsheet_key"]
-    # 2순위: 외부 소문자 key
-    if "spreadsheet_key" in secrets:
-        return secrets["spreadsheet_key"]
-    # 3순위: 외부 대문자 KEY
-    if "SPREADSHEET_KEY" in secrets:
-        return secrets["SPREADSHEET_KEY"]
-    
-    st.error('secrets.toml 파일에 "spreadsheet_key" 또는 "SPREADSHEET_KEY"를 찾을 수 없습니다.')
-    st.stop()
-
-
 @st.cache_resource
 def get_gspread_client():
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
     creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
     return gspread.authorize(creds)
+
+def get_spreadsheet_key():
+    """최초 코드의 키 검색 방식을 그대로 복원"""
+    try:
+        # [gcp_service_account] 섹션 안에 SPREADSHEET_KEY가 있는지 먼저 확인
+        return st.secrets["gcp_service_account"]["SPREADSHEET_KEY"]
+    except KeyError:
+        try:
+            # 섹션 밖에 SPREADSHEET_KEY가 있는지 확인
+            return st.secrets["SPREADSHEET_KEY"]
+        except KeyError:
+            st.error("Streamlit Secrets에 'SPREADSHEET_KEY'를 찾을 수 없습니다. 키 이름과 위치를 확인해주세요.")
+            st.stop()
 
 @st.cache_data(ttl=60)
 def load_data(sheet_name):
@@ -116,16 +112,14 @@ def login_screen():
 # =============================================================================
 # 3. 핵심 로직 함수
 # =============================================================================
-def auto_categorize(df, rules_df): # 규칙을 DataFrame으로 받습니다.
+def auto_categorize(df, rules_df):
     """거래내용(Description)을 기반으로 계정ID(Account_ID)를 자동 할당"""
     if rules_df.empty:
-        return df # 규칙이 없으면 그대로 반환
+        return df
 
-    # 규칙 적용을 위해 복사본 생성
     categorized_df = df.copy()
     
     for index, row in categorized_df.iterrows():
-        # 이미 계정ID가 있는 경우 건너뛰기
         if pd.notna(row.get('Account_ID')) and row.get('Account_ID') != '':
             continue
         
@@ -134,7 +128,7 @@ def auto_categorize(df, rules_df): # 규칙을 DataFrame으로 받습니다.
             keyword = str(rule['Keyword'])
             if keyword and keyword in description:
                 categorized_df.loc[index, 'Account_ID'] = rule['Account_ID']
-                break # 첫 번째 일치하는 규칙 적용 후 중단
+                break
     return categorized_df
 
 def calculate_pnl(transactions_df, inventory_df, accounts_df, selected_month):
@@ -248,8 +242,7 @@ def render_transaction_manager(data):
                 final_upload_df['Account_ID'] = ''
                 final_upload_df['Transaction_ID'] = [str(uuid.uuid4()) for _ in range(len(final_upload_df))]
 
-                # 자동 분류 적용
-                final_upload_df = auto_categorize(final_upload_df, data["RULES"]) # 시트에서 불러온 규칙 사용
+                final_upload_df = auto_categorize(final_upload_df, data["RULES"])
 
                 if st.button("📈 위 내역 `통합거래` 시트에 추가하기", type="primary"):
                     combined_df = pd.concat([data["TRANSACTIONS"], final_upload_df], ignore_index=True)
@@ -267,7 +260,6 @@ def render_transaction_manager(data):
     
     editable_df = data["TRANSACTIONS"].copy()
     if show_uncategorized:
-        # 빈 문자열과 NaN 값을 모두 포함하여 필터링
         editable_df = editable_df[editable_df['Account_ID'].isnull() | (editable_df['Account_ID'] == '')].copy()
     
     account_options = data["ACCOUNTS"]['Account_ID'].tolist()
