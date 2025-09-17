@@ -22,40 +22,50 @@ SHEET_NAMES = {
     "FORMATS": "파일_포맷_마스터"
 }
 
-# --- OKPOS 파일 파싱을 위한 상수 정의 ---
-# ※ 실제 OKPOS 파일 양식에 맞게 이 숫자들을 조정해야 할 수 있습니다.
-OKPOS_DATA_START_ROW = 3  # 데이터 시작 행 (0부터 시작)
-OKPOS_COL_DATE = 0        # '일자' 컬럼 위치
-OKPOS_COL_DINE_IN_SALES = 4 # '홀매출' 컬럼 위치
-OKPOS_COL_TAKEOUT_SALES = 6 # '포장매출' 컬럼 위치
-OKPOS_COL_DELIVERY_SALES = 8# '배달매출' 컬럼 위치
+# --- 파일 포맷별 파싱 상수 정의 ---
+# OKPOS (0-based index)
+OKPOS_DATA_START_ROW = 7      # 8행부터 시작
+OKPOS_COL_DATE = 0            # A열
+OKPOS_COL_DINE_IN = 34        # AI열 (홀매출)
+OKPOS_COL_TAKEOUT = 36        # AK열 (포장매출)
+OKPOS_COL_DELIVERY = 38       # AM열 (배달매출)
+
+# 우리은행 (0-based index)
+WOORI_DATA_START_ROW = 4      # 5행부터 시작
+WOORI_COL_CHECK = 0           # A열 (데이터 유효성 검사용)
+WOORI_COL_DATETIME = 1        # B열 (거래일시)
+WOORI_COL_DESC = 3            # D열 (거래내용)
+WOORI_COL_AMOUNT = 4          # E열 (금액)
+
 
 # =============================================================================
-# ★★★ 전용 파서 함수들 (OKPOS 파서 업그레이드) ★★★
+# ★★★ 전용 파서 함수들 ★★★
 # =============================================================================
 
 def parse_okpos(df_raw):
-    """
-    사용자가 제공한 상세 로직을 적용하여 OKPOS 엑셀 파일을 파싱하는 함수.
-    하나의 행에서 홀/포장/배달 매출을 각각 별도의 거래로 추출합니다.
-    """
+    """OKPOS 엑셀 파일의 상세 규칙에 맞춰 데이터를 파싱하는 함수."""
     out = []
-    for i in range(OKPOS_DATA_START_ROW, df_raw.shape[0]):
-        try:
-            date_cell = df_raw.iloc[i, OKPOS_COL_DATE]
-            if pd.isna(date_cell) or any(keyword in str(date_cell) for keyword in ['소계', '합계', '월계']):
-                break
+    
+    # '합계' 행을 찾아 그 전까지만 데이터로 사용
+    try:
+        end_row_series = df_raw[df_raw.iloc[:, OKPOS_COL_DATE].astype(str).str.contains("합계", na=False)].index
+        end_row = end_row_series[0] if not end_row_series.empty else df_raw.shape[0]
+    except Exception:
+        end_row = df_raw.shape[0]
+    
+    df_data = df_raw.iloc[OKPOS_DATA_START_ROW:end_row]
 
-            # 엑셀의 숫자 형식 날짜와 일반 텍스트 날짜 모두 처리
-            if isinstance(date_cell, (int, float)):
-                date = (pd.to_datetime('1899-12-30') + pd.to_timedelta(date_cell, 'D')).strftime('%Y-%m-%d')
-            else:
-                cleaned_date_str = str(date_cell).replace("소계:", "").strip()
-                date = pd.to_datetime(cleaned_date_str).strftime('%Y-%m-%d')
+    for i, row in df_data.iterrows():
+        try:
+            date_cell = row.iloc[OKPOS_COL_DATE]
+            if pd.isna(date_cell): continue
+
+            cleaned_date_str = str(date_cell).replace("소계:", "").strip()
+            date = pd.to_datetime(cleaned_date_str).strftime('%Y-%m-%d')
             
-            홀매출 = pd.to_numeric(df_raw.iloc[i, OKPOS_COL_DINE_IN_SALES], errors='coerce')
-            포장매출 = pd.to_numeric(df_raw.iloc[i, OKPOS_COL_TAKEOUT_SALES], errors='coerce')
-            배달매출 = pd.to_numeric(df_raw.iloc[i, OKPOS_COL_DELIVERY_SALES], errors='coerce')
+            홀매출 = pd.to_numeric(row.iloc[OKPOS_COL_DINE_IN], errors='coerce')
+            포장매출 = pd.to_numeric(row.iloc[OKPOS_COL_TAKEOUT], errors='coerce')
+            배달매출 = pd.to_numeric(row.iloc[OKPOS_COL_DELIVERY], errors='coerce')
             
             if pd.notna(홀매출) and 홀매출 != 0:
                 out.append({'거래일자': date, '거래내용': 'OKPOS 홀매출', '금액': 홀매출})
@@ -68,20 +78,22 @@ def parse_okpos(df_raw):
             
     return pd.DataFrame(out)
 
-def parse_shinhan_bank(df_raw):
-    """신한은행 지출내역 엑셀 파일의 구조에 맞춰 데이터를 파싱하는 전용 함수"""
+def parse_woori_bank(df_raw):
+    """우리은행 거래내역조회 엑셀 파일의 상세 규칙에 맞춰 데이터를 파싱하는 함수."""
     out = []
-    DATE_COL, DESC_COL, AMOUNT_COL = '거래일자', '적요', '출금액'
-    
-    if not all(col in df_raw.columns for col in [DATE_COL, DESC_COL, AMOUNT_COL]):
-        st.error(f"신한은행 파일에 필수 컬럼({DATE_COL}, {DESC_COL}, {AMOUNT_COL})이 없습니다.")
-        return pd.DataFrame()
+    df_data = df_raw.iloc[WOORI_DATA_START_ROW:].copy()
 
-    for _, row in df_raw.iterrows():
+    for i, row in df_data.iterrows():
         try:
-            date = pd.to_datetime(row[DATE_COL]).strftime('%Y-%m-%d')
-            description = str(row[DESC_COL])
-            amount = pd.to_numeric(row[AMOUNT_COL], errors='coerce')
+            # A열에 숫자가 없으면 파싱 종료
+            if pd.isna(pd.to_numeric(row.iloc[WOORI_COL_CHECK], errors='coerce')):
+                break
+            
+            datetime_str = str(row.iloc[WOORI_COL_DATETIME]).split(' ')[0] # 시간 부분 제거
+            date = pd.to_datetime(datetime_str).strftime('%Y-%m-%d')
+            description = str(row.iloc[WOORI_COL_DESC])
+            amount = pd.to_numeric(row.iloc[WOORI_COL_AMOUNT], errors='coerce')
+
             if pd.notna(amount) and amount > 0:
                 out.append({'거래일자': date, '거래내용': description, '금액': amount})
         except Exception:
@@ -282,25 +294,18 @@ def render_data_page(data):
             st.markdown("---"); st.subheader("4. 데이터 처리 및 저장")
             
             try:
-                # 파서 유형에 따라 다르게 파일 읽기
-                if selected_format_name == "OKPOS 매출":
-                    df_raw = pd.read_excel(uploaded_file, engine='openpyxl', header=None)
-                else: # 신한은행 등 헤더가 있는 파일
-                    df_raw = pd.read_excel(uploaded_file, engine='openpyxl')
+                df_raw = pd.read_excel(uploaded_file, engine='openpyxl', header=None)
+                st.write("✅ 원본 파일 미리보기 (상위 10개)"); st.dataframe(df_raw.head(10))
                 
-                st.write("✅ 원본 파일 미리보기"); st.dataframe(df_raw.head())
-                
-                # 전용 파서 호출
                 df_parsed = pd.DataFrame()
                 if selected_format_name == "OKPOS 매출":
                     df_parsed = parse_okpos(df_raw)
-                elif selected_format_name == "신한은행 지출":
-                    df_parsed = parse_shinhan_bank(df_raw)
+                elif selected_format_name == "우리은행 지출":
+                    df_parsed = parse_woori_bank(df_raw)
                 
                 if df_parsed.empty:
-                    st.warning("파일에서 처리할 데이터를 찾지 못했습니다. 파일 내용이나 양식을 확인해주세요."); st.stop()
+                    st.warning("파일에서 처리할 데이터를 찾지 못했습니다. 파일 내용이나 파싱 규칙을 확인해주세요."); st.stop()
 
-                # 표준 형식 변환 및 후처리
                 df_final = df_parsed.copy()
                 df_final.loc[:, '사업장명'] = upload_location
                 df_final.loc[:, '구분'] = selected_format['데이터구분']
@@ -312,7 +317,6 @@ def render_data_page(data):
                 st.write("✅ 시스템 형식 변환 완료 (미리보기)"); st.dataframe(df_final.head())
                 
                 if selected_format['데이터구분'] == '비용':
-                    # ... (중복 검사 로직) ...
                     existing_trans = data["TRANSACTIONS"]
                     existing_trans['unique_key'] = existing_trans['사업장명'] + existing_trans['거래일자'].astype(str) + existing_trans['거래내용'] + existing_trans['금액'].astype(str)
                     df_final['unique_key'] = df_final['사업장명'] + df_final['거래일자'].astype(str) + df_final['거래내용'] + df_final['금액'].astype(str)
@@ -325,7 +329,6 @@ def render_data_page(data):
                 else:
                     df_to_process = df_final
                 
-                # ... (자동 분류 및 수동 처리) ...
                 df_processed_final = auto_categorize(df_to_process, data["RULES"])
                 num_auto = len(df_processed_final[df_processed_final['처리상태'] == '자동분류'])
                 st.info(f"총 **{len(df_processed_final)}**건의 신규 거래 중 **{num_auto}**건이 자동으로 분류되었습니다.")
