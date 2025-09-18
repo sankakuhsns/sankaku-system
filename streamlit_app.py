@@ -279,7 +279,7 @@ def render_data_page(data):
             else:
                 edited_inv = st.data_editor(data["INVENTORY"], num_rows="dynamic", use_container_width=True, hide_index=True,
                     column_config={"사업장명": st.column_config.SelectboxColumn("사업장명", options=data["LOCATIONS"]['사업장명'].tolist(), required=True)})
-                if st.button("💾 월별재고 저장"):
+                if st.button("💾 월별재고 저장", key="save_inventory"):
                     if update_sheet(SHEET_NAMES["INVENTORY"], edited_inv): st.success("저장되었습니다."); st.rerun()
 
     elif st.session_state.current_step == 'confirm':
@@ -326,7 +326,7 @@ def render_data_page(data):
             return
 
         st.subheader(f"✍️ 분류 작업대 (남은 내역: {len(st.session_state.workbench_data)}건)")
-        st.info("변경을 원하는 행의 계정과목을 지정하고 저장하세요. 일부만 처리할 수 있습니다.")
+        st.info("계정과목이 지정된 항목은 저장 버튼 클릭 시 자동으로 저장됩니다.")
         
         accounts_df = data["ACCOUNTS"]
         account_options = [""] + [f"[{r['대분류']}/{r['소분류']}] ({r['계정ID']})" for _, r in accounts_df.iterrows()]
@@ -353,57 +353,47 @@ def render_data_page(data):
         )
 
         st.markdown("---")
-        if st.button("💾 변경된 내용 저장하기", type="primary", use_container_width=True):
+        if st.button("💾 저장하기", type="primary", use_container_width=True):
             # --- 부분 저장 로직 (단순화 및 안정화 버전) ---
             
             # 1. 편집 후 데이터에 원본 ID 다시 붙이기
             # st.data_editor는 인덱스를 유지하므로, 이를 기준으로 ID를 안전하게 매칭
-            edited_df_with_ids = edited_df.copy()
-            edited_df_with_ids['거래ID'] = df_original_workbench['거래ID']
+            edited_with_ids = edited_df.copy().reset_index(drop=True)
+            original_ids = df_original_workbench['거래ID'].reset_index(drop=True)
+            edited_with_ids['거래ID'] = original_ids
+
+            # 2. '완성된 행' 필터링 (계정과목이 지정된 모든 행)
+            is_complete = edited_with_ids['계정과목_선택'].notna() & (edited_with_ids['계정과목_선택'] != "")
             
-            # 2. 완성된 행과 미완성 행 분리
-            is_complete = (
-                edited_df_with_ids['계정과목_선택'].notna() & (edited_df_with_ids['계정과목_선택'] != "") &
-                edited_df_with_ids['거래일자'].notna() &
-                edited_df_with_ids['금액'].notna()
-            )
-            df_complete = edited_df_with_ids[is_complete]
-            df_incomplete_ids = edited_df_with_ids[~is_complete]['거래ID']
+            df_to_process = edited_with_ids[is_complete]
+            df_to_keep = edited_with_ids[~is_complete]
 
-            # 3. 원본과 비교하여 실제로 변경된 항목만 저장 대상으로 선정
-            df_to_save_final = []
-            if not df_complete.empty:
-                for index, edited_row in df_complete.iterrows():
-                    original_row = df_original_workbench[df_original_workbench['거래ID'] == edited_row['거래ID']].iloc[0]
-                    original_display_account = id_to_account.get(original_row['계정ID'], "")
-
-                    # 하나라도 다르면 변경된 것으로 간주
-                    if not (original_row['거래내용'] == edited_row['거래내용'] and \
-                            np.isclose(original_row['금액'], edited_row['금액']) and \
-                            original_display_account == edited_row['계정과목_선택']):
-                        
-                        row_to_save = original_row.copy()
-                        row_to_save['거래일자'] = edited_row['거래일자']
-                        row_to_save['거래내용'] = edited_row['거래내용']
-                        row_to_save['금액'] = edited_row['금액']
-                        row_to_save['계정ID'] = account_map[edited_row['계정과목_선택']]
-                        row_to_save['처리상태'] = '수동확인'
-                        df_to_save_final.append(row_to_save)
-
-            # 4. 최종 처리
-            if not df_to_save_final:
-                st.info("저장할 만큼 충분히 수정된 항목이 없습니다.")
+            if df_to_process.empty:
+                st.info("저장할 항목이 없습니다. (계정과목이 지정된 항목이 저장 대상입니다)")
             else:
-                df_saved = pd.DataFrame(df_to_save_final)
+                # 3. 원본 데이터와 합쳐서 최종 저장 데이터 생성
+                df_to_save = pd.merge(
+                    df_to_process[['거래ID', '거래일자', '거래내용', '금액', '계정과목_선택']],
+                    df_original_workbench.drop(columns=['거래일자', '거래내용', '금액', '계정ID']),
+                    on='거래ID'
+                )
+                df_to_save['계정ID'] = df_to_save['계정과목_선택'].map(account_map)
+                df_to_save['처리상태'] = '수동확인'
+                df_to_save = df_to_save.drop(columns=['계정과목_선택'])
                 
-                with st.spinner(f"{len(df_saved)}건의 항목을 저장하는 중입니다..."):
-                    combined_trans = pd.concat([data["TRANSACTIONS"], df_saved], ignore_index=True)
+                # 4. 시트 업데이트
+                with st.spinner(f"{len(df_to_save)}건의 항목을 저장하는 중입니다..."):
+                    # 최종 컬럼 순서 맞추기
+                    final_cols = data["TRANSACTIONS"].columns
+                    df_to_save = df_to_save.reindex(columns=final_cols).fillna('')
+
+                    combined_trans = pd.concat([data["TRANSACTIONS"], df_to_save], ignore_index=True)
                     if update_sheet(SHEET_NAMES["TRANSACTIONS"], combined_trans):
-                        st.success(f"{len(df_saved)}건을 성공적으로 저장했습니다.")
+                        st.success(f"{len(df_to_save)}건을 성공적으로 저장했습니다.")
                         
-                        # 작업대에는 저장되지 않은 항목들만 남김
-                        saved_ids = df_saved['거래ID']
-                        remaining_df = df_original_workbench[~df_original_workbench['거래ID'].isin(saved_ids)]
+                        # 5. 작업대에 남길 데이터 업데이트
+                        remaining_ids = df_to_keep['거래ID']
+                        remaining_df = df_original_workbench[df_original_workbench['거래ID'].isin(remaining_ids)]
                         
                         if remaining_df.empty:
                             del st.session_state.workbench_data
@@ -435,7 +425,7 @@ def render_settings_page(data):
             column_config={"데이터구분": st.column_config.SelectboxColumn("데이터구분", options=["수익", "비용"], required=True)})
         if st.button("파일 포맷 저장", key="save_formats"):
             if update_sheet(SHEET_NAMES["FORMATS"], edited_formats): st.success("저장되었습니다."); st.rerun()
-            
+
 # =============================================================================
 # 5. 메인 실행 로직
 # =============================================================================
@@ -469,4 +459,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
