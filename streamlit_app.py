@@ -316,7 +316,7 @@ def render_data_page(data):
             upload_location = st.selectbox("2. 데이터를 귀속시킬 사업장을 선택하세요.", location_list)
             uploaded_file = st.file_uploader("3. 해당 포맷의 파일을 업로드하세요.", type=["xlsx", "xls", "csv"])
 
-            if st.button("4. 파일 처리 및 확인 단계로 이동", type="primary", use_container_width=True):
+            if st.button("4. 파일 처리 및 데이터 확인", type="primary", use_container_width=True):
                 if not uploaded_file: st.error("파일을 먼저 업로드해주세요.")
                 else:
                     with st.spinner("파일을 처리하는 중입니다..."):
@@ -328,21 +328,37 @@ def render_data_page(data):
                         if df_raw is None: st.error("지원하지 않는 파일 형식입니다."); return
 
                         df_parsed = pd.DataFrame()
+                        # 포맷에 따라 파서 분기
                         if selected_format_name == "OKPOS 매출": df_parsed = parse_okpos(df_raw)
                         elif selected_format_name == "우리은행 지출": df_parsed = parse_woori_bank(df_raw)
+                        
                         if df_parsed.empty: st.warning("파일에서 처리할 데이터를 찾지 못했습니다."); return
 
-                        df_final = df_parsed.copy()
-                        df_final['사업장명'] = upload_location
-                        df_final['구분'] = data["FORMATS"][data["FORMATS"]['포맷명'] == selected_format_name].iloc[0]['데이터구분']
-                        df_final['데이터소스'] = selected_format_name
-                        df_final['처리상태'] = '미분류'
-                        df_final['계정ID'] = ''
-                        df_final['거래ID'] = [str(uuid.uuid4()) for _ in range(len(df_final))]
-                        
-                        st.session_state.df_processed = df_final
-                        st.session_state.current_step = 'confirm'
-                        st.rerun()
+                        # --- OKPOS 와 그 외 포맷 워크플로우 분기 ---
+                        if selected_format_name == "OKPOS 매출":
+                            df_final = df_parsed.copy()
+                            df_final['사업장명'] = upload_location
+                            df_final['구분'] = '수익'
+                            df_final['데이터소스'] = selected_format_name
+                            df_final['처리상태'] = '자동등록' # OKPOS는 자동등록으로 처리
+                            df_final['계정ID'] = '' # 계정과목 없음
+                            df_final['거래ID'] = [str(uuid.uuid4()) for _ in range(len(df_final))]
+                            
+                            st.session_state.okpos_preview_data = df_final
+                            st.session_state.current_step = 'okpos_preview'
+                            st.rerun()
+                        else: # OKPOS가 아닌 다른 모든 포맷
+                            df_final = df_parsed.copy()
+                            df_final['사업장명'] = upload_location
+                            df_final['구분'] = data["FORMATS"][data["FORMATS"]['포맷명'] == selected_format_name].iloc[0]['데이터구분']
+                            df_final['데이터소스'] = selected_format_name
+                            df_final['처리상태'] = '미분류'
+                            df_final['계정ID'] = ''
+                            df_final['거래ID'] = [str(uuid.uuid4()) for _ in range(len(df_final))]
+                            
+                            st.session_state.df_processed = df_final
+                            st.session_state.current_step = 'confirm'
+                            st.rerun()
         with tab2:
             st.subheader("월별재고 관리")
             if data["LOCATIONS"].empty:
@@ -352,6 +368,31 @@ def render_data_page(data):
                     column_config={"사업장명": st.column_config.SelectboxColumn("사업장명", options=data["LOCATIONS"]['사업장명'].tolist(), required=True)})
                 if st.button("💾 월별재고 저장", key="save_inventory"):
                     if update_sheet(SHEET_NAMES["INVENTORY"], edited_inv): st.success("저장되었습니다."); st.rerun()
+    
+    # +++ 신규: OKPOS 전용 미리보기 및 저장 단계 +++
+    elif st.session_state.current_step == 'okpos_preview':
+        st.subheader("✅ OKPOS 매출 데이터 미리보기 및 저장")
+        df_preview = st.session_state.get('okpos_preview_data', pd.DataFrame())
+
+        if df_preview.empty:
+            st.warning("미리보기할 데이터가 없습니다. 이전 단계로 돌아가세요.")
+        else:
+            st.dataframe(df_preview[['거래일자', '거래내용', '금액']], use_container_width=True, hide_index=True)
+
+        col1, col2 = st.columns(2)
+        if col1.button("🔙 이전 단계로"):
+            del st.session_state.okpos_preview_data
+            st.session_state.current_step = 'upload'
+            st.rerun()
+        
+        if col2.button("💾 최종 저장하기", type="primary"):
+            with st.spinner("데이터를 저장하는 중입니다..."):
+                combined_trans = pd.concat([data["TRANSACTIONS"], df_preview], ignore_index=True)
+                if update_sheet(SHEET_NAMES["TRANSACTIONS"], combined_trans):
+                    st.success(f"OKPOS 매출 데이터 {len(df_preview)}건이 성공적으로 저장되었습니다.")
+                    del st.session_state.okpos_preview_data
+                    st.session_state.current_step = 'upload'
+                    st.rerun()
 
     elif st.session_state.current_step == 'confirm':
         st.subheader("✅ 1단계: 확인 및 확정")
@@ -371,7 +412,7 @@ def render_data_page(data):
         df_manual = df_processed[df_processed['처리상태'] == '미분류']
 
         if not df_duplicates.empty:
-            with st.expander(f"⚠️ **{len(df_duplicates)}건의 중복 의심 거래**가 발견되었습니다. (날짜와 상관없이 내용, 금액 일치)"):
+            with st.expander(f"⚠️ **{len(df_duplicates)}건의 중복 의심 거래**가 발견되었습니다."):
                 st.dataframe(df_duplicates[['거래일자', '거래내용', '금액']])
         
         if not df_auto.empty:
@@ -380,10 +421,10 @@ def render_data_page(data):
                 st.dataframe(df_auto_display[['거래일자', '거래내용', '금액', '대분류', '소분류']], hide_index=True)
 
         col1, col2 = st.columns(2)
-        if col1.button("🔙 이전 단계로", use_container_width=True):
+        if col1.button("🔙 이전 단계로"):
             st.session_state.current_step = 'upload'; st.rerun()
 
-        if col2.button("2단계: 분류 작업대 열기 ➡️", type="primary", use_container_width=True):
+        if col2.button("2단계: 분류 작업대 열기 ➡️", type="primary"):
             st.session_state.workbench_data = pd.concat([df_auto, df_manual], ignore_index=True).drop(columns=['duplicate_key'], errors='ignore')
             st.session_state.current_step = 'workbench'
             st.rerun()
@@ -391,7 +432,7 @@ def render_data_page(data):
     elif st.session_state.current_step == 'workbench':
         if 'workbench_data' not in st.session_state or st.session_state.workbench_data.empty:
             st.success("모든 내역 처리가 완료되었습니다.")
-            if st.button("초기 화면으로 돌아가기", use_container_width=True):
+            if st.button("초기 화면으로 돌아가기"):
                 st.session_state.current_step = 'upload'
                 st.rerun()
             return
@@ -424,7 +465,7 @@ def render_data_page(data):
         )
 
         st.markdown("---")
-        if st.button("💾 저장하기", type="primary", use_container_width=True):
+        if st.button("💾 저장하기", type="primary"):
             edited_with_ids = edited_df.copy().reset_index(drop=True)
             original_ids = df_original_workbench['거래ID'].reset_index(drop=True)
             edited_with_ids['거래ID'] = original_ids
@@ -526,3 +567,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
