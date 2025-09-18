@@ -288,14 +288,32 @@ def render_data_page(data):
 
         location_list = data["LOCATIONS"]['사업장명'].tolist()
         upload_location = st.selectbox("2. 데이터를 귀속시킬 사업장을 선택하세요.", location_list)
+        
+        # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+        # CSV 파일 업로드를 허용하도록 type에 'csv' 추가
+        # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
         uploaded_file = st.file_uploader("3. 해당 포맷의 파일을 업로드하세요.", type=["xlsx", "xls", "csv"])
 
         if uploaded_file and upload_location and selected_format_name:
             st.markdown("---"); st.subheader("4. 데이터 처리 및 저장")
             
             try:
-                df_raw = pd.read_excel(uploaded_file, engine='openpyxl', header=None)
-                st.write("✅ 원본 파일 미리보기 (상위 10개)"); st.dataframe(df_raw.head(10))
+                # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+                # 파일 확장자에 따라 올바른 방식으로 파일 읽기 (오류 수정)
+                # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+                df_raw = None
+                if uploaded_file.name.endswith('.csv'):
+                    # CSV 파일일 경우, 한글 인코딩(cp949)으로 읽기
+                    df_raw = pd.read_csv(uploaded_file, encoding='cp949')
+                elif uploaded_file.name.endswith(('.xlsx', '.xls')):
+                    # OKPOS는 헤더가 없으므로 header=None으로 읽기
+                    read_header = None if selected_format_name == "OKPOS 매출" else 0
+                    df_raw = pd.read_excel(uploaded_file, header=read_header)
+                
+                if df_raw is None:
+                    st.error("지원하지 않는 파일 형식입니다."); st.stop()
+
+                st.write("✅ 원본 파일 미리보기"); st.dataframe(df_raw.head(10))
                 
                 df_parsed = pd.DataFrame()
                 if selected_format_name == "OKPOS 매출":
@@ -306,6 +324,7 @@ def render_data_page(data):
                 if df_parsed.empty:
                     st.warning("파일에서 처리할 데이터를 찾지 못했습니다. 파일 내용이나 파싱 규칙을 확인해주세요."); st.stop()
 
+                # (이하 로직은 이전과 동일)
                 df_final = df_parsed.copy()
                 df_final.loc[:, '사업장명'] = upload_location
                 df_final.loc[:, '구분'] = selected_format['데이터구분']
@@ -366,7 +385,7 @@ def render_data_page(data):
         if st.button("💾 월별재고 저장"):
             if update_sheet(SHEET_NAMES["INVENTORY"], edited_inv):
                 st.success("저장되었습니다."); st.rerun()
-
+                
 def render_settings_page(data):
     st.header("⚙️ 설정 관리")
     tab1, tab2, tab3, tab4 = st.tabs(["🏢 사업장 관리", "📚 계정과목 관리", "🤖 자동분류 규칙", "📄 파일 포맷 관리"])
@@ -416,4 +435,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
