@@ -202,7 +202,6 @@ def calculate_pnl(transactions_df, inventory_df, accounts_df, selected_month, se
 # 4. UI 렌더링 함수
 # =============================================================================
 def render_pnl_page(data):
-    # (이전과 동일)
     st.header("📅 월별 정산표")
     col1, col2 = st.columns(2)
     if not data["LOCATIONS"].empty and '사업장명' in data["LOCATIONS"].columns:
@@ -224,7 +223,6 @@ def render_pnl_page(data):
             if not expense_chart_data.empty: st.subheader("비용 구성 시각화"); st.bar_chart(expense_chart_data, x='대분류', y='금액')
 
 def render_data_page(data):
-    # (이전과 동일)
     st.header("✍️ 데이터 관리")
 
     if 'current_step' not in st.session_state: st.session_state.current_step = 'upload'
@@ -326,14 +324,17 @@ def render_data_page(data):
             if "" in edited_workbench['계정과목_선택'].tolist():
                 st.error("모든 항목의 `계정과목`을 선택해야 저장이 가능합니다.")
             else:
-                edited_workbench['계정ID'] = edited_workbench['계정과목_선택'].map(account_map)
-                edited_workbench['처리상태'] = edited_workbench.apply(
-                    lambda row: '수동확인' if row.get('처리상태') == '미분류' else row.get('처리상태'), axis=1
+                # 사용자가 편집한 최종본을 기준으로 원본 데이터프레임(df_workbench)을 업데이트합니다.
+                # 이는 data_editor가 원본의 인덱스를 유지한다는 점을 활용합니다.
+                df_workbench.update(edited_workbench)
+
+                # 계정ID와 처리상태를 업데이트합니다.
+                df_workbench['계정ID'] = df_workbench['계정과목_선택'].map(account_map)
+                df_workbench['처리상태'] = df_workbench.apply(
+                    lambda row: '수동확인' if row['처리상태'] == '미분류' else row['처리상태'], axis=1
                 )
                 
-                final_to_save = df_workbench.copy()
-                final_to_save.update(edited_workbench)
-                final_to_save = final_to_save.drop(columns=['계정과목_선택'])
+                final_to_save = df_workbench.drop(columns=['계정과목_선택'])
                 
                 combined_trans = pd.concat([data["TRANSACTIONS"], final_to_save], ignore_index=True)
                 if update_sheet(SHEET_NAMES["TRANSACTIONS"], combined_trans):
