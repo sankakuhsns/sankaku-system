@@ -18,7 +18,7 @@ SHEET_NAMES = {
     "FORMATS": "파일_포맷_마스터"
 }
 
-# --- 파싱 상수 정의 (0-based index) ---
+# 파싱 상수 정의
 OKPOS_DATA_START_ROW, OKPOS_COL_DATE, OKPOS_COL_DINE_IN, OKPOS_COL_TAKEOUT, OKPOS_COL_DELIVERY = 7, 0, 34, 36, 38
 WOORI_DATA_START_ROW, WOORI_COL_CHECK, WOORI_COL_DATETIME, WOORI_COL_DESC, WOORI_COL_AMOUNT = 4, 0, 1, 3, 4
 
@@ -210,154 +210,151 @@ def render_pnl_page(data):
 def render_data_page(data):
     st.header("✍️ 데이터 관리")
 
-    st.subheader("🏢 데이터 현황")
-    if data["TRANSACTIONS"].empty:
-        st.info("아직 등록된 거래내역이 없습니다. 아래에서 파일을 업로드해주세요.")
-    else:
-        summary = data["TRANSACTIONS"].groupby(['사업장명', '데이터소스']).agg(건수=('거래ID', 'count'), 최초거래일=('거래일자', 'min'), 최종거래일=('거래일자', 'max')).reset_index()
-        for location in data["LOCATIONS"]['사업장명']:
-            st.markdown(f"**{location}**")
-            loc_summary = summary[summary['사업장명'] == location]
-            if loc_summary.empty: st.write("└ 데이터 없음")
-            else:
-                for _, row in loc_summary.iterrows():
-                    st.write(f"└ `{row['데이터소스']}`: {row['최초거래일']} ~ {row['최종거래일']} (총 {row['건수']}건)")
-    st.markdown("---")
-
-    if data["LOCATIONS"].empty or data["ACCOUNTS"].empty or data["FORMATS"].empty:
-        st.error("`설정 관리`에서 `사업장`, `계정과목`, `파일 포맷`을 먼저 등록해야 합니다."); st.stop()
-
-    tab1, tab2 = st.tabs(["거래내역 관리 (파일 업로드)", "월별재고 관리"])
-    with tab1:
-        st.subheader("파일 기반 거래내역 관리")
-        
-        format_list = data["FORMATS"]['포맷명'].tolist()
-        selected_format_name = st.selectbox("1. 처리할 파일 포맷을 선택하세요.", format_list)
-        selected_format = data["FORMATS"][data["FORMATS"]['포맷명'] == selected_format_name].iloc[0]
-
-        location_list = data["LOCATIONS"]['사업장명'].tolist()
-        upload_location = st.selectbox("2. 데이터를 귀속시킬 사업장을 선택하세요.", location_list)
-        uploaded_file = st.file_uploader("3. 해당 포맷의 파일을 업로드하세요.", type=["xlsx", "xls", "csv"])
-
-        if uploaded_file and upload_location and selected_format_name:
-            st.markdown("---"); st.subheader("4. 데이터 처리 및 저장")
-            
-            try:
-                # 파일 읽기 로직 (이전과 동일)
-                df_raw = None
-                if uploaded_file.name.endswith('.csv'):
-                    try: df_raw = pd.read_csv(uploaded_file, encoding='utf-8', header=None)
-                    except UnicodeDecodeError: uploaded_file.seek(0); df_raw = pd.read_csv(uploaded_file, encoding='cp949', header=None)
-                else: df_raw = pd.read_excel(uploaded_file, header=None)
-                if df_raw is None: st.error("지원하지 않는 파일 형식입니다."); st.stop()
-                
-                # 전용 파서 호출
-                df_parsed = pd.DataFrame()
-                if selected_format_name == "OKPOS 매출": df_parsed = parse_okpos(df_raw)
-                elif selected_format_name == "우리은행 지출": df_parsed = parse_woori_bank(df_raw)
-                if df_parsed.empty: st.warning("파일에서 처리할 데이터를 찾지 못했습니다."); st.stop()
-
-                # 표준 형식으로 변환 및 중복 검사
-                df_final = df_parsed.copy()
-                df_final.loc[:, '사업장명'] = upload_location; df_final.loc[:, '구분'] = selected_format['데이터구분']
-                df_final.loc[:, '데이터소스'] = selected_format_name; df_final.loc[:, '처리상태'] = '미분류'
-                df_final.loc[:, '계정ID'] = ''; df_final.loc[:, '거래ID'] = [str(uuid.uuid4()) for _ in range(len(df_final))]
-                
-                if selected_format['데이터구분'] == '비용':
-                    existing = data["TRANSACTIONS"]; df_to_process = df_final
-                    if not existing.empty:
-                        existing['unique_key'] = existing['사업장명'] + existing['거래일자'].astype(str) + existing['거래내용'] + existing['금액'].astype(str)
-                        df_final['unique_key'] = df_final['사업장명'] + df_final['거래일자'].astype(str) + df_final['거래내용'] + df_final['금액'].astype(str)
-                        duplicates = df_final[df_final['unique_key'].isin(existing['unique_key'])]
-                        new = df_final[~df_final['unique_key'].isin(existing['unique_key'])].drop(columns=['unique_key'])
-                        if not duplicates.empty:
-                            with st.expander(f"⚠️ {len(duplicates)}건의 중복 의심 거래가 제외되었습니다."):
-                                st.dataframe(duplicates[['거래일자', '거래내용', '금액']])
-                        df_to_process = new
-                else: df_to_process = df_final
-                
-                # 자동/수동 처리 데이터 분리
-                df_processed = auto_categorize(df_to_process, data["RULES"])
-                df_auto = df_processed[df_processed['처리상태'] == '자동분류']
-                df_manual = df_processed[df_processed['처리상태'] == '미분류']
-
-                st.markdown("---")
-                if not df_auto.empty:
-                    with st.expander(f"✅ **{len(df_auto)}**건이 자동으로 분류되었습니다. (펼쳐서 확인)"):
-                        df_auto_display = pd.merge(df_auto, data["ACCOUNTS"], on="계정ID", how="left")
-                        st.dataframe(df_auto_display[['거래일자', '거래내용', '금액', '대분류', '소분류']], hide_index=True)
-                
-                # --- ★★★ 새로운 미분류 처리 UI ★★★ ---
-                if not df_manual.empty:
-                    st.subheader(f"✍️ **{len(df_manual)}**건의 미분류 내역 처리")
-                    
-                    accounts_df = data["ACCOUNTS"]
-                    account_options = [""] + [f"[{r['대분류']}/{r['소분류']}] ({r['계정ID']})" for _, r in accounts_df.iterrows()]
-                    account_map = {f"[{r['대분류']}/{r['소분류']}] ({r['계정ID']})": r['계정ID'] for _, r in accounts_df.iterrows()}
-
-                    if 'manual_selections' not in st.session_state: st.session_state.manual_selections = {}
-                    
-                    for index, row in df_manual.iterrows():
-                        st.markdown("---")
-                        cols = st.columns([0.5, 1.5, 1, 1])
-                        cols[0].write(f"**{row['거래일자']}**")
-                        cols[1].write(f"{row['거래내용']}")
-                        cols[1].write(f"**{row['금액']:,.0f} 원**")
-
-                        selection = cols[2].selectbox("계정과목 선택", account_options, key=f"sel_{row['거래ID']}")
-                        st.session_state.manual_selections[row['거래ID']] = selection
-
-                        if selection:
-                            if cols[3].button("규칙 생성 ✨", key=f"btn_rule_ui_{row['거래ID']}", use_container_width=True):
-                                st.session_state[f"rule_ui_for_{row['거래ID']}"] = not st.session_state.get(f"rule_ui_for_{row['거래ID']}", False)
-                        
-                        if st.session_state.get(f"rule_ui_for_{row['거래ID']}"):
-                            suggested = suggest_keywords(row['거래내용'])
-                            if not suggested:
-                                st.warning("추천할 키워드가 없습니다. `자동분류 규칙` 설정 메뉴에서 직접 추가해주세요.")
-                            else:
-                                st.write("추천 키워드:")
-                                rule_cols = st.columns(len(suggested))
-                                for i, keyword in enumerate(suggested):
-                                    if rule_cols[i].button(keyword, key=f"kw_{row['거래ID']}_{keyword}", use_container_width=True):
-                                        new_rule = {'데이터소스': '*', '키워드': keyword, '계정ID': account_map[selection]}
-                                        updated_rules = pd.concat([data["RULES"], pd.DataFrame([new_rule])], ignore_index=True)
-                                        if update_sheet(SHEET_NAMES["RULES"], updated_rules):
-                                            st.success(f"✅ 규칙 추가 완료: '{keyword}' -> '{selection.split(' ')[0]}'")
-                                            del st.session_state[f"rule_ui_for_{row['거래ID']}"]
-                                            st.rerun()
-
-                    st.markdown("---")
-                    if st.button("💾 위 내역 `통합거래_원장`에 최종 저장하기", type="primary", use_container_width=True):
-                        processed_manuals = []
-                        all_selected = True
-                        for _, row in df_manual.iterrows():
-                            sel_str = st.session_state.manual_selections.get(row['거래ID'])
-                            if not sel_str: all_selected = False; break
-                            new_row = row.copy()
-                            new_row['계정ID'] = account_map[sel_str]
-                            new_row['처리상태'] = '수동확인'
-                            processed_manuals.append(new_row)
-                        
-                        if not all_selected: st.error("모든 항목의 `계정과목`을 선택해야 저장이 가능합니다.")
-                        else:
-                            final_to_save = pd.concat([data["TRANSACTIONS"], df_auto, pd.DataFrame(processed_manuals)], ignore_index=True)
-                            if update_sheet(SHEET_NAMES["TRANSACTIONS"], final_to_save):
-                                st.success("모든 신규 거래내역이 저장되었습니다."); st.rerun()
+    # --- Session State 초기화 ---
+    if 'current_step' not in st.session_state: st.session_state.current_step = 'upload'
+    
+    # --- 1단계: 파일 업로드 ---
+    if st.session_state.current_step == 'upload':
+        st.subheader("🏢 데이터 현황")
+        if data["TRANSACTIONS"].empty:
+            st.info("아직 등록된 거래내역이 없습니다. 아래에서 파일을 업로드해주세요.")
+        else:
+            summary = data["TRANSACTIONS"].groupby(['사업장명', '데이터소스']).agg(건수=('거래ID', 'count'), 최초거래일=('거래일자', 'min'), 최종거래일=('거래일자', 'max')).reset_index()
+            for location in data["LOCATIONS"]['사업장명']:
+                st.markdown(f"**{location}**")
+                loc_summary = summary[summary['사업장명'] == location]
+                if loc_summary.empty: st.write("└ 데이터 없음")
                 else:
-                    st.success("모든 신규 내역이 자동으로 분류되어 저장 준비가 완료되었습니다.")
-                    if st.button("💾 자동 분류된 내역 저장하기", use_container_width=True):
-                        if update_sheet(SHEET_NAMES["TRANSACTIONS"], pd.concat([data["TRANSACTIONS"], df_auto])):
-                            st.success("저장되었습니다."); st.rerun()
+                    for _, row in loc_summary.iterrows(): st.write(f"└ `{row['데이터소스']}`: {row['최초거래일']} ~ {row['최종거래일']} (총 {row['건수']}건)")
+        st.markdown("---")
+        
+        if data["LOCATIONS"].empty or data["ACCOUNTS"].empty or data["FORMATS"].empty:
+            st.error("`설정 관리`에서 `사업장`, `계정과목`, `파일 포맷`을 먼저 등록해야 합니다."); st.stop()
 
-            except Exception as e: st.error(f"파일 처리 중 오류: {e}")
+        tab1, tab2 = st.tabs(["거래내역 관리 (파일 업로드)", "월별재고 관리"])
+        with tab1:
+            st.subheader("파일 기반 거래내역 관리")
+            format_list = data["FORMATS"]['포맷명'].tolist()
+            selected_format_name = st.selectbox("1. 처리할 파일 포맷을 선택하세요.", format_list)
+            location_list = data["LOCATIONS"]['사업장명'].tolist()
+            upload_location = st.selectbox("2. 데이터를 귀속시킬 사업장을 선택하세요.", location_list)
+            uploaded_file = st.file_uploader("3. 해당 포맷의 파일을 업로드하세요.", type=["xlsx", "xls", "csv"])
 
-    with tab2:
-        st.subheader("월별재고 관리")
-        edited_inv = st.data_editor(data["INVENTORY"], num_rows="dynamic", use_container_width=True, hide_index=True,
-            column_config={"사업장명": st.column_config.SelectboxColumn("사업장명", options=data["LOCATIONS"]['사업장명'].tolist(), required=True)})
-        if st.button("💾 월별재고 저장"):
-            if update_sheet(SHEET_NAMES["INVENTORY"], edited_inv): st.success("저장되었습니다."); st.rerun()
+            if uploaded_file and upload_location and selected_format_name:
+                with st.spinner("파일을 처리하는 중입니다..."):
+                    df_raw = None
+                    if uploaded_file.name.endswith('.csv'):
+                        try: df_raw = pd.read_csv(uploaded_file, encoding='utf-8', header=None)
+                        except UnicodeDecodeError: uploaded_file.seek(0); df_raw = pd.read_csv(uploaded_file, encoding='cp949', header=None)
+                    else: df_raw = pd.read_excel(uploaded_file, header=None)
+                    if df_raw is None: st.error("지원하지 않는 파일 형식입니다."); st.stop()
+                    
+                    df_parsed = pd.DataFrame()
+                    if selected_format_name == "OKPOS 매출": df_parsed = parse_okpos(df_raw)
+                    elif selected_format_name == "우리은행 지출": df_parsed = parse_woori_bank(df_raw)
+                    if df_parsed.empty: st.warning("파일에서 처리할 데이터를 찾지 못했습니다."); return
+
+                    df_final = df_parsed.copy()
+                    df_final.loc[:, '사업장명'] = upload_location
+                    df_final.loc[:, '구분'] = data["FORMATS"][data["FORMATS"]['포맷명'] == selected_format_name].iloc[0]['데이터구분']
+                    df_final.loc[:, '데이터소스'] = selected_format_name; df_final.loc[:, '처리상태'] = '미분류'
+                    df_final.loc[:, '계정ID'] = ''; df_final.loc[:, '거래ID'] = [str(uuid.uuid4()) for _ in range(len(df_final))]
+                    
+                    if df_final['구분'].iloc[0] == '비용':
+                        existing = data["TRANSACTIONS"]
+                        if not existing.empty:
+                            existing['unique_key'] = existing['사업장명'] + existing['거래일자'].astype(str) + existing['거래내용'] + existing['금액'].astype(str)
+                            df_final['unique_key'] = df_final['사업장명'] + df_final['거래일자'].astype(str) + df_final['거래내용'] + df_final['금액'].astype(str)
+                            df_to_process = df_final[~df_final['unique_key'].isin(existing['unique_key'])].drop(columns=['unique_key'])
+                        else: df_to_process = df_final
+                    else: df_to_process = df_final
+                    
+                    df_processed = auto_categorize(df_to_process, data["RULES"])
+                    st.session_state.df_auto = df_processed[df_processed['처리상태'] == '자동분류']
+                    st.session_state.df_manual = df_processed[df_processed['처리상태'] == '미분류']
+                    st.session_state.current_step = 'classify'
+                    st.rerun()
+        
+        with tab2:
+            st.subheader("월별재고 관리")
+            edited_inv = st.data_editor(data["INVENTORY"], num_rows="dynamic", use_container_width=True, hide_index=True,
+                column_config={"사업장명": st.column_config.SelectboxColumn("사업장명", options=data["LOCATIONS"]['사업장명'].tolist(), required=True)})
+            if st.button("💾 월별재고 저장"):
+                if update_sheet(SHEET_NAMES["INVENTORY"], edited_inv): st.success("저장되었습니다."); st.rerun()
+
+    # --- 2단계: 수동 분류 ---
+    elif st.session_state.current_step == 'classify':
+        df_auto = st.session_state.df_auto
+        df_manual = st.session_state.df_manual
+
+        if not df_auto.empty:
+            with st.expander(f"✅ **{len(df_auto)}**건이 자동으로 분류되었습니다. (펼쳐서 확인)"):
+                df_auto_display = pd.merge(df_auto, data["ACCOUNTS"], on="계정ID", how="left")
+                st.dataframe(df_auto_display[['거래일자', '거래내용', '금액', '대분류', '소분류']], hide_index=True)
+
+        if not df_manual.empty:
+            st.subheader(f"✍️ **{len(df_manual)}**건의 미분류 내역 처리")
+            accounts_df = data["ACCOUNTS"]
+            account_options = [""] + [f"[{r['대분류']}/{r['소분류']}] ({r['계정ID']})" for _, r in accounts_df.iterrows()]
+            account_map = {f"[{r['대분류']}/{r['소분류']}] ({r['계정ID']})": r['계정ID'] for _, r in accounts_df.iterrows()}
+
+            df_manual['계정과목_선택'] = ""
+            edited_manual = st.data_editor(df_manual[['거래일자', '거래내용', '금액', '계정과목_선택']], hide_index=True, use_container_width=True,
+                column_config={"계정과목_선택": st.column_config.SelectboxColumn("계정과목 선택", options=account_options, required=True)})
+            
+            if st.button("💾 분류 완료 및 저장", type="primary", use_container_width=True):
+                if "" in edited_manual['계정과목_선택'].tolist():
+                    st.error("모든 항목의 `계정과목`을 선택해야 저장이 가능합니다.")
+                else:
+                    edited_manual['계정ID'] = edited_manual['계정과목_선택'].map(account_map)
+                    edited_manual['처리상태'] = '수동확인'
+                    st.session_state.classified_manual = edited_manual.copy()
+                    combined = pd.concat([data["TRANSACTIONS"], df_auto, edited_manual.drop(columns=['계정과목_선택'])], ignore_index=True)
+                    if update_sheet(SHEET_NAMES["TRANSACTIONS"], combined):
+                        st.session_state.current_step = 'suggest_rules'
+                        st.rerun()
+        else:
+            st.success("모든 신규 내역이 자동으로 분류되었습니다.")
+            if st.button("💾 자동 분류된 내역 저장하기", use_container_width=True):
+                if update_sheet(SHEET_NAMES["TRANSACTIONS"], pd.concat([data["TRANSACTIONS"], df_auto])):
+                    st.session_state.current_step = 'upload'; st.rerun()
+
+    # --- 3단계: 규칙 추천 ---
+    elif st.session_state.current_step == 'suggest_rules':
+        st.subheader("🤖 규칙 추가 제안")
+        st.info("방금 저장한 내역을 분석하여, 앞으로 자동화할 수 있는 규칙을 제안합니다.")
+        
+        classified_manual = st.session_state.classified_manual
+        suggestions = classified_manual.groupby('계정ID')['거래내용'].apply(list).reset_index()
+        
+        accounts_map = data["ACCOUNTS"].set_index('계정ID').to_dict('index')
+
+        for _, row in suggestions.iterrows():
+            account_info = accounts_map.get(row['계정ID'])
+            if not account_info: continue
+            
+            st.markdown("---")
+            st.write(f"아래 거래들을 **`[{account_info['대분류']}/{account_info['소분류']}]`**(으)로 분류하셨습니다.")
+            for desc in row['거래내용']: st.caption(f"- {desc}")
+
+            keywords = suggest_keywords(' '.join(row['거래내용']))
+            if keywords:
+                st.write("**추천 키워드로 규칙을 추가하세요:**")
+                rule_cols = st.columns(len(keywords))
+                for i, keyword in enumerate(keywords):
+                    if rule_cols[i].button(keyword, key=f"kw_{row['계정ID']}_{keyword}", use_container_width=True):
+                        new_rule = {'데이터소스': '*', '키워드': keyword, '계정ID': row['계정ID']}
+                        updated_rules = pd.concat([data["RULES"], pd.DataFrame([new_rule])], ignore_index=True)
+                        if update_sheet(SHEET_NAMES["RULES"], updated_rules):
+                            st.success(f"✅ 규칙 추가 완료: '{keyword}'"); st.rerun()
+        
+        st.markdown("---")
+        if st.button("완료하고 돌아가기", use_container_width=True):
+            # 세션 스테이트 정리
+            for key in ['current_step', 'df_auto', 'df_manual', 'classified_manual']:
+                if key in st.session_state: del st.session_state[key]
+            st.rerun()
+
 
 def render_settings_page(data):
     st.header("⚙️ 설정 관리")
@@ -399,7 +396,11 @@ def main():
         choice = st.sidebar.radio("메뉴를 선택하세요.", menu)
         
         st.sidebar.markdown("---")
-        if st.sidebar.button("🔃 데이터 새로고침"): st.cache_data.clear(); st.rerun()
+        if st.sidebar.button("🔃 데이터 새로고침"):
+            # 세션 상태 초기화 추가
+            for key in list(st.session_state.keys()):
+                if key != 'logged_in': del st.session_state[key]
+            st.cache_data.clear(); st.rerun()
         if st.sidebar.button("로그아웃"): st.session_state.clear(); st.rerun()
             
         if choice == "📅 월별 정산표": render_pnl_page(data)
