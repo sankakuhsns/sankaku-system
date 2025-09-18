@@ -354,51 +354,55 @@ def render_data_page(data):
 
         st.markdown("---")
         if st.button("💾 저장하기", type="primary", use_container_width=True):
-            # --- 부분 저장 로직 (단순화 및 안정화 버전) ---
-            
             # 1. 편집 후 데이터에 원본 ID 다시 붙이기
-            # st.data_editor는 인덱스를 유지하므로, 이를 기준으로 ID를 안전하게 매칭
             edited_with_ids = edited_df.copy().reset_index(drop=True)
             original_ids = df_original_workbench['거래ID'].reset_index(drop=True)
             edited_with_ids['거래ID'] = original_ids
-
+            
             # 2. '완성된 행' 필터링 (계정과목이 지정된 모든 행)
             is_complete = edited_with_ids['계정과목_선택'].notna() & (edited_with_ids['계정과목_선택'] != "")
             
             df_to_process = edited_with_ids[is_complete]
-            df_to_keep = edited_with_ids[~is_complete]
+            df_to_keep_ids = edited_with_ids[~is_complete]['거래ID']
 
             if df_to_process.empty:
                 st.info("저장할 항목이 없습니다. (계정과목이 지정된 항목이 저장 대상입니다)")
             else:
-                # 3. 원본 데이터와 합쳐서 최종 저장 데이터 생성
-                df_to_save = pd.merge(
-                    df_to_process[['거래ID', '거래일자', '거래내용', '금액', '계정과목_선택']],
-                    df_original_workbench.drop(columns=['거래일자', '거래내용', '금액', '계정ID']),
-                    on='거래ID'
-                )
-                df_to_save['계정ID'] = df_to_save['계정과목_선택'].map(account_map)
-                df_to_save['처리상태'] = '수동확인'
-                df_to_save = df_to_save.drop(columns=['계정과목_선택'])
+                # 3. 최종 저장 데이터 생성
+                rows_to_save = []
+                for index, processed_row in df_to_process.iterrows():
+                    original_row = df_original_workbench[df_original_workbench['거래ID'] == processed_row['거래ID']].iloc[0]
+                    
+                    final_row = original_row.copy()
+                    final_row['거래일자'] = processed_row['거래일자']
+                    final_row['거래내용'] = processed_row['거래내용']
+                    final_row['금액'] = processed_row['금액']
+                    final_row['계정ID'] = account_map[processed_row['계정과목_선택']]
+                    
+                    # --- 핵심 수정: 계정과목 변경 시에만 '수동확인'으로 변경 ---
+                    original_account_selection = id_to_account.get(original_row['계정ID'], "")
+                    if original_account_selection != processed_row['계정과목_선택']:
+                        final_row['처리상태'] = '수동확인'
+                    # 변경되지 않았으면 원본의 '처리상태'('자동분류' 등)가 그대로 유지됨
+                    
+                    rows_to_save.append(final_row)
                 
-                # 4. 시트 업데이트
-                with st.spinner(f"{len(df_to_save)}건의 항목을 저장하는 중입니다..."):
-                    # 최종 컬럼 순서 맞추기
-                    final_cols = data["TRANSACTIONS"].columns
-                    df_to_save = df_to_save.reindex(columns=final_cols).fillna('')
+                df_saved = pd.DataFrame(rows_to_save)
 
-                    combined_trans = pd.concat([data["TRANSACTIONS"], df_to_save], ignore_index=True)
+                # 4. 시트 업데이트
+                with st.spinner(f"{len(df_saved)}건의 항목을 저장하는 중입니다..."):
+                    final_cols = data["TRANSACTIONS"].columns
+                    df_saved = df_saved.reindex(columns=final_cols).fillna('')
+
+                    combined_trans = pd.concat([data["TRANSACTIONS"], df_saved], ignore_index=True)
                     if update_sheet(SHEET_NAMES["TRANSACTIONS"], combined_trans):
-                        st.success(f"{len(df_to_save)}건을 성공적으로 저장했습니다.")
+                        st.success(f"{len(df_saved)}건을 성공적으로 저장했습니다.")
                         
                         # 5. 작업대에 남길 데이터 업데이트
-                        remaining_ids = df_to_keep['거래ID']
-                        remaining_df = df_original_workbench[df_original_workbench['거래ID'].isin(remaining_ids)]
-                        
-                        if remaining_df.empty:
+                        if df_to_keep_ids.empty:
                             del st.session_state.workbench_data
                         else:
-                            st.session_state.workbench_data = remaining_df.reset_index(drop=True)
+                            st.session_state.workbench_data = df_original_workbench[df_original_workbench['거래ID'].isin(df_to_keep_ids)].reset_index(drop=True)
                         
                         st.rerun()
 
