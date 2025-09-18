@@ -79,25 +79,51 @@ def parse_okpos(df_raw):
             
     return pd.DataFrame(out)
 
+# 기존의 parse_woori_bank 함수를 지우고 아래 내용으로 붙여넣으세요.
+
 def parse_woori_bank(df_raw):
-    """우리은행 거래내역조회 엑셀 파일의 상세 규칙에 맞춰 데이터를 파싱하는 함수."""
+    """[개선된 버전] 우리은행 거래내역조회 엑셀 파일을 파싱하는 함수.
+    오류가 발생하는 행을 추적하고 보고하는 기능이 추가되었습니다.
+    """
     out = []
+    error_rows = [] # 오류가 발생한 행 번호를 기록할 리스트
+    
+    # 사용자가 말한 5행부터 시작 (0-based index 이므로 4)
     df_data = df_raw.iloc[WOORI_DATA_START_ROW:].copy()
 
-    for i, row in df_data.iterrows():
+    for index, row in df_data.iterrows():
+        excel_row_num = index + 1 # 엑셀의 실제 행 번호 (사용자에게 보여주기 위함)
+        
         try:
-            if pd.isna(pd.to_numeric(row.iloc[WOORI_COL_CHECK], errors='coerce')):
+            # A열에 유효한 숫자가 없으면 데이터의 끝으로 간주하고 중단
+            check_val = row.iloc[WOORI_COL_CHECK]
+            if pd.isna(pd.to_numeric(check_val, errors='coerce')):
                 break
             
+            # B열에서 날짜 부분만 추출
             datetime_str = str(row.iloc[WOORI_COL_DATETIME]).split(' ')[0]
             date = pd.to_datetime(datetime_str).strftime('%Y-%m-%d')
+            
+            # D열 거래내용
             description = str(row.iloc[WOORI_COL_DESC])
+            
+            # E열 금액
             amount = pd.to_numeric(row.iloc[WOORI_COL_AMOUNT], errors='coerce')
 
-            if pd.notna(amount) and amount > 0:
+            # 모든 데이터가 유효한지 최종 확인
+            if pd.notna(amount) and amount > 0 and description.strip() != '':
                 out.append({'거래일자': date, '거래내용': description, '금액': amount})
+            else:
+                # 데이터는 유효하나 금액이 0이거나 내용이 없는 경우
+                error_rows.append(excel_row_num)
         except Exception:
+            # 날짜 변환 실패 등 예외 발생 시
+            error_rows.append(excel_row_num)
             continue
+            
+    # 파싱 완료 후, 오류가 있었던 행들을 사용자에게 알림
+    if error_rows:
+        st.warning(f"⚠️ **{len(error_rows)}개 행 변환 누락:** 엑셀 파일의 다음 행에서 데이터를 읽는 데 문제가 발생했습니다. 원본 파일에서 해당 행의 날짜, 금액 형식을 확인해주세요.\n\n- **문제가 발생한 행:** {', '.join(map(str, error_rows))}")
             
     return pd.DataFrame(out)
 
@@ -431,3 +457,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
