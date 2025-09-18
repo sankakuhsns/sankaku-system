@@ -35,15 +35,11 @@ WOORI_COL_DATETIME = 1
 WOORI_COL_DESC = 3
 WOORI_COL_AMOUNT = 4
 
-
 # =============================================================================
 # ★★★ 전용 파서 함수들 ★★★
 # =============================================================================
-
 def parse_okpos(df_raw):
-    """OKPOS 엑셀 파일의 상세 규칙에 맞춰 데이터를 파싱하는 함수."""
     out = []
-    
     try:
         end_row_series = df_raw[df_raw.iloc[:, OKPOS_COL_DATE].astype(str).str.contains("합계", na=False)].index
         end_row = end_row_series[0] if not end_row_series.empty else df_raw.shape[0]
@@ -51,13 +47,11 @@ def parse_okpos(df_raw):
         end_row = df_raw.shape[0]
     
     df_data = df_raw.iloc[OKPOS_DATA_START_ROW:end_row]
-
-    for i, row in df_data.iterrows():
+    for index, row in df_data.iterrows():
         try:
             date_cell = row.iloc[OKPOS_COL_DATE]
             if pd.isna(date_cell) or any(keyword in str(date_cell) for keyword in ['소계', '합계', '월계']):
                 break
-
             if isinstance(date_cell, (int, float)):
                 date = (pd.to_datetime('1899-12-30') + pd.to_timedelta(date_cell, 'D')).strftime('%Y-%m-%d')
             else:
@@ -68,67 +62,38 @@ def parse_okpos(df_raw):
             포장매출 = pd.to_numeric(row.iloc[OKPOS_COL_TAKEOUT], errors='coerce')
             배달매출 = pd.to_numeric(row.iloc[OKPOS_COL_DELIVERY], errors='coerce')
             
-            if pd.notna(홀매출) and 홀매출 != 0:
-                out.append({'거래일자': date, '거래내용': 'OKPOS 홀매출', '금액': 홀매출})
-            if pd.notna(포장매출) and 포장매출 != 0:
-                out.append({'거래일자': date, '거래내용': 'OKPOS 포장매출', '금액': 포장매출})
-            if pd.notna(배달매출) and 배달매출 != 0:
-                out.append({'거래일자': date, '거래내용': 'OKPOS 배달매출', '금액': 배달매출})
-        except Exception:
-            continue
-            
+            if pd.notna(홀매출) and 홀매출 != 0: out.append({'거래일자': date, '거래내용': 'OKPOS 홀매출', '금액': 홀매출})
+            if pd.notna(포장매출) and 포장매출 != 0: out.append({'거래일자': date, '거래내용': 'OKPOS 포장매출', '금액': 포장매출})
+            if pd.notna(배달매출) and 배달매출 != 0: out.append({'거래일자': date, '거래내용': 'OKPOS 배달매출', '금액': 배달매출})
+        except Exception: continue
     return pd.DataFrame(out)
 
-# 기존의 parse_woori_bank 함수를 지우고 아래 내용으로 붙여넣으세요.
-
 def parse_woori_bank(df_raw):
-    """[개선된 버전] 우리은행 거래내역조회 엑셀 파일을 파싱하는 함수.
-    오류가 발생하는 행을 추적하고 보고하는 기능이 추가되었습니다.
-    """
-    out = []
-    error_rows = [] # 오류가 발생한 행 번호를 기록할 리스트
-    
-    # 사용자가 말한 5행부터 시작 (0-based index 이므로 4)
+    out, error_rows = [], []
     df_data = df_raw.iloc[WOORI_DATA_START_ROW:].copy()
-
     for index, row in df_data.iterrows():
-        excel_row_num = index + 1 # 엑셀의 실제 행 번호 (사용자에게 보여주기 위함)
-        
+        excel_row_num = index + 1
         try:
-            # A열에 유효한 숫자가 없으면 데이터의 끝으로 간주하고 중단
             check_val = row.iloc[WOORI_COL_CHECK]
-            if pd.isna(pd.to_numeric(check_val, errors='coerce')):
-                break
+            if pd.isna(pd.to_numeric(check_val, errors='coerce')): break
             
-            # B열에서 날짜 부분만 추출
             datetime_str = str(row.iloc[WOORI_COL_DATETIME]).split(' ')[0]
             date = pd.to_datetime(datetime_str).strftime('%Y-%m-%d')
-            
-            # D열 거래내용
             description = str(row.iloc[WOORI_COL_DESC])
-            
-            # E열 금액
             amount = pd.to_numeric(row.iloc[WOORI_COL_AMOUNT], errors='coerce')
 
-            # 모든 데이터가 유효한지 최종 확인
             if pd.notna(amount) and amount > 0 and description.strip() != '':
                 out.append({'거래일자': date, '거래내용': description, '금액': amount})
-            else:
-                # 데이터는 유효하나 금액이 0이거나 내용이 없는 경우
-                error_rows.append(excel_row_num)
+            else: error_rows.append(excel_row_num)
         except Exception:
-            # 날짜 변환 실패 등 예외 발생 시
-            error_rows.append(excel_row_num)
-            continue
+            error_rows.append(excel_row_num); continue
             
-    # 파싱 완료 후, 오류가 있었던 행들을 사용자에게 알림
     if error_rows:
-        st.warning(f"⚠️ **{len(error_rows)}개 행 변환 누락:** 엑셀 파일의 다음 행에서 데이터를 읽는 데 문제가 발생했습니다. 원본 파일에서 해당 행의 날짜, 금액 형식을 확인해주세요.\n\n- **문제가 발생한 행:** {', '.join(map(str, error_rows))}")
-            
+        st.warning(f"⚠️ **{len(error_rows)}개 행 변환 누락:** 엑셀 파일의 다음 행에서 데이터를 읽는 데 문제가 발생했습니다.\n\n- **문제가 발생한 행:** {', '.join(map(str, error_rows[:10]))}{'...' if len(error_rows) > 10 else ''}")
     return pd.DataFrame(out)
 
 # =============================================================================
-# 1. 구글 시트 연결 및 데이터 처리 함수
+# 1. 구글 시트 연결 및 데이터 처리 함수 (이하 동일)
 # =============================================================================
 def get_spreadsheet_key():
     try: return st.secrets["gcp_service_account"]["SPREADSHEET_KEY"]
@@ -173,7 +138,7 @@ def update_sheet(sheet_name, df):
         st.error(f"'{sheet_name}' 시트 업데이트 중 오류: {e}"); return False
 
 # =============================================================================
-# 2. 로그인 및 인증, 3. 핵심 로직
+# 2. 로그인, 3. 핵심 로직 (이하 동일)
 # =============================================================================
 def login_screen():
     st.title("🏢 통합 정산 관리 시스템")
@@ -320,19 +285,19 @@ def render_data_page(data):
             st.markdown("---"); st.subheader("4. 데이터 처리 및 저장")
             
             try:
+                # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+                # 개선된 파일 읽기 로직: 모든 파일을 header=None으로 읽어 파서에 전달
+                # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
                 df_raw = None
                 if uploaded_file.name.endswith('.csv'):
-                    try:
-                        df_raw = pd.read_csv(uploaded_file, encoding='utf-8')
+                    try: df_raw = pd.read_csv(uploaded_file, encoding='utf-8', header=None)
                     except UnicodeDecodeError:
                         uploaded_file.seek(0)
-                        df_raw = pd.read_csv(uploaded_file, encoding='cp949')
+                        df_raw = pd.read_csv(uploaded_file, encoding='cp949', header=None)
                 elif uploaded_file.name.endswith(('.xlsx', '.xls')):
-                    read_header = None if selected_format_name == "OKPOS 매출" else 0
-                    df_raw = pd.read_excel(uploaded_file, header=read_header)
+                    df_raw = pd.read_excel(uploaded_file, header=None)
                 
-                if df_raw is None:
-                    st.error("지원하지 않는 파일 형식입니다."); st.stop()
+                if df_raw is None: st.error("지원하지 않는 파일 형식입니다."); st.stop()
                 
                 st.write("✅ 원본 파일 미리보기"); st.dataframe(df_raw.head(10))
                 
@@ -457,4 +422,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
