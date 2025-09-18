@@ -417,23 +417,23 @@ def render_settings_page(data):
     tab1, tab2, tab3, tab4 = st.tabs(["🏢 사업장 관리", "📚 계정과목 관리", "🤖 자동분류 규칙", "📄 파일 포맷 관리"])
     with tab1:
         edited_locs = st.data_editor(data["LOCATIONS"], num_rows="dynamic", use_container_width=True, hide_index=True)
-        if st.button("사업장 정보 저장"):
+        if st.button("사업장 정보 저장", key="save_locations"):
             if update_sheet(SHEET_NAMES["LOCATIONS"], edited_locs): st.success("저장되었습니다."); st.rerun()
     with tab2:
         edited_accs = st.data_editor(data["ACCOUNTS"], num_rows="dynamic", use_container_width=True, hide_index=True)
-        if st.button("계정과목 저장"):
+        if st.button("계정과목 저장", key="save_accounts"):
             if update_sheet(SHEET_NAMES["ACCOUNTS"], edited_accs): st.success("저장되었습니다."); st.rerun()
     with tab3:
         if data["ACCOUNTS"].empty: st.warning("`계정과목 관리` 탭에서 계정과목을 먼저 추가해주세요.")
         else:
             edited_rules = st.data_editor(data["RULES"], num_rows="dynamic", use_container_width=True, hide_index=True,
                 column_config={"계정ID": st.column_config.SelectboxColumn("계정ID", options=data["ACCOUNTS"]['계정ID'].tolist(), required=True)})
-            if st.button("자동분류 규칙 저장"):
+            if st.button("자동분류 규칙 저장", key="save_rules"):
                 if update_sheet(SHEET_NAMES["RULES"], edited_rules): st.success("저장되었습니다."); st.rerun()
     with tab4:
         edited_formats = st.data_editor(data["FORMATS"], num_rows="dynamic", use_container_width=True, hide_index=True,
             column_config={"데이터구분": st.column_config.SelectboxColumn("데이터구분", options=["수익", "비용"], required=True)})
-        if st.button("파일 포맷 저장"):
+        if st.button("파일 포맷 저장", key="save_formats"):
             if update_sheet(SHEET_NAMES["FORMATS"], edited_formats): st.success("저장되었습니다."); st.rerun()
             
 # =============================================================================
@@ -469,3 +469,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
