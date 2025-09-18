@@ -144,12 +144,11 @@ def auto_categorize(df, rules_df):
                 categorized_df.loc[index, '처리상태'] = '자동분류'; break
     return categorized_df
 
-# --- 재설계된 정산표 계산 함수 (대분류 직접 사용 + 전월 대비) ---
 def calculate_pnl_new(transactions_df, accounts_df, selected_month, selected_location):
     def get_monthly_data(month_str):
         month_trans = transactions_df[transactions_df['거래일자'].dt.strftime('%Y-%m') == month_str].copy()
         if month_trans.empty:
-            return {'총매출': 0, '총비용': 0, '영업이익': 0}, pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+            return {'총매출': 0, '총비용': 0, '영업이익': 0}, pd.DataFrame(columns=['소분류', '금액']), pd.DataFrame(columns=['대분류', '소분류', '금액']), pd.DataFrame()
 
         pnl_data = pd.merge(month_trans, accounts_df, on='계정ID', how='left')
         pnl_data['대분류'] = pnl_data['대분류'].fillna('기타')
@@ -176,42 +175,47 @@ def calculate_pnl_new(transactions_df, accounts_df, selected_month, selected_loc
     prev_month_str = (datetime.strptime(selected_month + '-01', '%Y-%m-%d') - relativedelta(months=1)).strftime('%Y-%m')
     
     current_metrics, current_sales, current_expenses, current_details = get_monthly_data(selected_month)
-    prev_metrics, _, _, _ = get_monthly_data(prev_month_str)
+    prev_metrics, _, prev_expenses, _ = get_monthly_data(prev_month_str)
     
-    # 증감률 계산
     def calc_change(current, prev):
-        if prev == 0:
-            return 0 if current == 0 else np.inf # 이전 값이 0이면 증감률을 0 또는 무한대로 처리
-        return ((current - prev) / prev) * 100
+        if prev > 0:
+            return ((current - prev) / prev) * 100
+        return np.inf if current > 0 else 0
 
     current_metrics['총매출_증감'] = calc_change(current_metrics['총매출'], prev_metrics['총매출'])
     current_metrics['총비용_증감'] = calc_change(current_metrics['총비용'], prev_metrics['총비용'])
     current_metrics['영업이익_증감'] = calc_change(current_metrics['영업이익'], prev_metrics['영업이익'])
     current_metrics['영업이익률'] = (current_metrics['영업이익'] / current_metrics['총매출']) * 100 if current_metrics['총매출'] > 0 else 0
     
-    return current_metrics, current_sales, current_expenses, current_details
+    if not current_expenses.empty:
+        expense_merged = pd.merge(
+            current_expenses,
+            prev_expenses,
+            on=['대분류', '소분류'],
+            how='outer',
+            suffixes=('_현재', '_과거')
+        ).fillna(0)
+        expense_merged['증감률'] = expense_merged.apply(lambda row: calc_change(row['금액_현재'], row['금액_과거']), axis=1)
+    else:
+        expense_merged = pd.DataFrame(columns=['대분류', '소분류', '금액_현재', '금액_과거', '증감률'])
 
-# --- 엑셀 다운로드 헬퍼 함수 ---
+    return current_metrics, current_sales, expense_merged, current_details
+
 def create_excel_report(metrics, sales_breakdown, expense_breakdown):
     output = BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        # 요약 시트
         summary_data = {
             "항목": ["총매출", "총비용", "영업이익", "영업이익률"],
             "금액": [f"{metrics['총매출']:,.0f} 원", f"{metrics['총비용']:,.0f} 원", f"{metrics['영업이익']:,.0f} 원", f"{metrics['영업이익률']:.1f} %"],
             "전월 대비": [f"{metrics['총매출_증감']:.1f} %", f"{metrics['총비용_증감']:.1f} %", f"{metrics['영업이익_증감']:.1f} %", ""]
         }
-        summary_df = pd.DataFrame(summary_data)
-        summary_df.to_excel(writer, sheet_name='손익 요약', index=False)
-
-        # 매출 상세 시트
+        pd.DataFrame(summary_data).to_excel(writer, sheet_name='손익 요약', index=False)
         sales_breakdown.to_excel(writer, sheet_name='매출 상세', index=False)
         
-        # 비용 상세 시트
-        expense_breakdown.to_excel(writer, sheet_name='비용 상세', index=False)
+        expense_report_df = expense_breakdown.rename(columns={'금액_현재': '당월 금액', '금액_과거': '전월 금액', '증감률': '증감률(%)'})
+        expense_report_df.to_excel(writer, sheet_name='비용 상세', index=False)
         
-    processed_data = output.getvalue()
-    return processed_data
+    return output.getvalue()
 
 # =============================================================================
 # 4. UI 렌더링 함수
@@ -230,17 +234,10 @@ def render_pnl_page(data):
     metrics, sales_breakdown, expense_breakdown, pnl_details_df = calculate_pnl_new(data["TRANSACTIONS"], data["ACCOUNTS"], selected_month, selected_location)
 
     if not metrics or (metrics['총매출'] == 0 and metrics['총비용'] == 0):
-        st.warning(f"'{selected_location}'의 {selected_month} 데이터가 없습니다.")
-        st.stop()
+        st.warning(f"'{selected_location}'의 {selected_month} 데이터가 없습니다."); st.stop()
     
     excel_data = create_excel_report(metrics, sales_breakdown, expense_breakdown)
-    col3.download_button(
-        label="📥 엑셀로 다운로드",
-        data=excel_data,
-        file_name=f"{selected_month}_{selected_location}_정산표.xlsx",
-        mime="application/vnd.ms-excel",
-        use_container_width=True
-    )
+    col3.download_button("📥 엑셀로 다운로드", excel_data, f"{selected_month}_{selected_location}_정산표.xlsx", "application/vnd.ms-excel", use_container_width=True)
     
     st.markdown("---")
 
@@ -248,70 +245,81 @@ def render_pnl_page(data):
     with summary_col:
         st.subheader("📊 손익 요약")
         m1, m2, m3 = st.columns(3)
-        m1.metric("총매출", f"{metrics.get('총매출', 0):,.0f} 원", f"{metrics.get('총매출_증감', 0):.1f}% 전월 대비")
-        m2.metric("총비용", f"{metrics.get('총비용', 0):,.0f} 원", f"{metrics.get('총비용_증감', 0):.1f}% 전월 대비")
-        m3.metric("영업이익", f"{metrics.get('영업이익', 0):,.0f} 원", f"{metrics.get('영업이익_증감', 0):.1f}% 전월 대비")
+        m1.metric("총매출", f"{metrics['총매출']:,.0f} 원", f"{metrics['총매출_증감']:.1f}%")
+        m2.metric("총비용", f"{metrics['총비용']:,.0f} 원", f"{metrics['총비용_증감']:.1f}%", delta_color="inverse")
+        m3.metric("영업이익", f"{metrics['영업이익']:,.0f} 원", f"{metrics['영업이익_증감']:.1f}%")
         st.markdown("---")
 
-        with st.expander(f"**Ⅰ. 총매출: {metrics.get('총매출', 0):,.0f} 원**", expanded=False):
+        with st.expander(f"**Ⅰ. 총매출: {metrics['총매출']:,.0f} 원**", expanded=False):
             st.dataframe(sales_breakdown.rename(columns={'소분류': '항목', '금액': '금액(원)'}), use_container_width=True, hide_index=True)
 
-        with st.expander(f"**Ⅱ. 총비용: {metrics.get('총비용', 0):,.0f} 원**", expanded=True):
-            for major_cat in expense_breakdown['대분류'].unique():
+        with st.expander(f"**Ⅱ. 총비용: {metrics['총비용']:,.0f} 원**", expanded=True):
+            expense_order = ['인건비', '식자재', '소모품', '광고비', '고정비']
+            all_major_cats = expense_breakdown['대분류'].unique()
+            sorted_major_cats = [cat for cat in expense_order if cat in all_major_cats] + [cat for cat in all_major_cats if cat not in expense_order and cat != 0]
+
+            for major_cat in sorted_major_cats:
                 major_df = expense_breakdown[expense_breakdown['대분류'] == major_cat]
-                major_total = major_df['금액'].sum()
-                with st.expander(f"**{major_cat}: {major_total:,.0f} 원**"):
+                major_total_current = major_df['금액_현재'].sum()
+                major_total_prev = major_df['금액_과거'].sum()
+                major_mom = calc_change(major_total_current, major_total_prev)
+                major_percentage = (major_total_current / metrics['총비용']) * 100 if metrics['총비용'] > 0 else 0
+                
+                delta_str = f"{major_mom:+.1f}%" if np.isfinite(major_mom) else "N/A"
+                expander_title = f"**{major_cat}: {major_total_current:,.0f} 원 ({major_percentage:.1f}%)**"
+                
+                with st.expander(expander_title):
+                    st.caption(f"전월 대비: {delta_str}")
                     for _, row in major_df.iterrows():
-                        sub_col1, sub_col2 = st.columns([0.8, 0.2])
-                        sub_col1.markdown(f"- {row['소분류']}: **{row['금액']:,.0f} 원**")
-                        if sub_col2.button("상세 거래 보기", key=f"btn_{row['소분류']}"):
+                        sub_col1, sub_col2, sub_col3 = st.columns([0.6, 0.2, 0.2])
+                        sub_col1.markdown(f"- {row['소분류']}: **{row['금액_현재']:,.0f} 원**")
+                        delta_text = f"{row['증감률']:+.1f}%" if np.isfinite(row['증감률']) else ""
+                        sub_col2.metric("", "", delta=delta_text, delta_color="inverse")
+                        if sub_col3.button("거래 보기", key=f"btn_{row['소분류']}", use_container_width=True):
                             detail_df = pnl_details_df[pnl_details_df['소분류'] == row['소분류']]
                             st.dataframe(detail_df[['거래일자', '사업장명', '거래내용', '금액']].sort_values('거래일자'), use_container_width=True, hide_index=True)
         
-        st.markdown(f"--- \n ### **Ⅲ. 영업이익: {metrics.get('영업이익', 0):,.0f} 원 ({metrics.get('영업이익률', 0):.1f}%)**")
+        st.markdown(f"--- \n ### **Ⅲ. 영업이익: {metrics['영업이익']:,.0f} 원 ({metrics['영업이익률']:.1f}%)**")
 
     with chart_col:
         st.subheader("📈 시각화 분석")
         if not sales_breakdown.empty:
             st.markdown("**매출 비중**")
-            fig_pie_sales = px.pie(sales_breakdown, names='소분류', values='금액', hole=.4, title=f"총 매출: {metrics.get('총매출', 0):,.0f} 원")
+            fig_pie_sales = px.pie(sales_breakdown, names='소분류', values='금액', hole=.4, title=f"총 매출: {metrics['총매출']:,.0f} 원")
             fig_pie_sales.update_traces(textinfo='percent+label', textfont_size=14)
             st.plotly_chart(fig_pie_sales, use_container_width=True)
         
         if not expense_breakdown.empty:
-            expense_by_major = expense_breakdown.groupby('대분류')['금액'].sum().reset_index()
+            expense_by_major = expense_breakdown.groupby('대분류')['금액_현재'].sum().reset_index()
             st.markdown("**비용 비중**")
-            fig_pie_expenses = px.pie(expense_by_major, names='대분류', values='금액', hole=.4, title=f"총 비용: {metrics.get('총비용', 0):,.0f} 원")
+            fig_pie_expenses = px.pie(expense_by_major, names='대분류', values='금액_현재', hole=.4, title=f"총 비용: {metrics['총비용']:,.0f} 원")
             fig_pie_expenses.update_traces(textinfo='percent+label', textfont_size=14)
             st.plotly_chart(fig_pie_expenses, use_container_width=True)
 
 def render_data_page(data):
     st.header("✍️ 데이터 관리")
-
-    if 'current_step' not in st.session_state: st.session_state.current_step = 'upload'
-    
+    if 'current_step' not in st.session_state:
+        st.session_state.current_step = 'upload'
     if st.session_state.current_step == 'upload':
         st.subheader("🏢 데이터 현황")
-        if data["TRANSACTIONS"].empty: st.info("아직 등록된 거래내역이 없습니다. 아래에서 파일을 업로드해주세요.")
+        if data["TRANSACTIONS"].empty:
+            st.info("아직 등록된 거래내역이 없습니다. 아래에서 파일을 업로드해주세요.")
         else:
             trans_df_copy = data["TRANSACTIONS"].copy()
             trans_df_copy['거래일자'] = pd.to_datetime(trans_df_copy['거래일자'], errors='coerce').dt.normalize()
-            summary = trans_df_copy.groupby(['사업장명', '데이터소스']).agg(
-                건수=('거래ID', 'count'), 최초거래일=('거래일자', 'min'), 최종거래일=('거래일자', 'max')
-            ).reset_index()
-            
+            summary = trans_df_copy.groupby(['사업장명', '데이터소스']).agg(건수=('거래ID', 'count'), 최초거래일=('거래일자', 'min'), 최종거래일=('거래일자', 'max')).reset_index()
             for location in data["LOCATIONS"]['사업장명']:
                 st.markdown(f"**{location}**")
                 loc_summary = summary[summary['사업장명'] == location]
-                if loc_summary.empty: st.write("└ 데이터 없음")
+                if loc_summary.empty:
+                    st.write("└ 데이터 없음")
                 else:
-                    for _, row in loc_summary.iterrows(): 
+                    for _, row in loc_summary.iterrows():
                         st.write(f"└ `{row['데이터소스']}`: {row['최초거래일'].strftime('%Y-%m-%d')} ~ {row['최종거래일'].strftime('%Y-%m-%d')} (총 {row['건수']}건)")
         st.markdown("---")
-        
         if data["LOCATIONS"].empty or data["ACCOUNTS"].empty or data["FORMATS"].empty:
-            st.error("`설정 관리`에서 `사업장`, `계정과목`, `파일 포맷`을 먼저 등록해야 합니다."); st.stop()
-
+            st.error("`설정 관리`에서 `사업장`, `계정과목`, `파일 포맷`을 먼저 등록해야 합니다.")
+            st.stop()
         tab1, tab2 = st.tabs(["거래내역 관리 (파일 업로드)", "월별재고 관리"])
         with tab1:
             st.subheader("파일 기반 거래내역 관리")
@@ -320,41 +328,45 @@ def render_data_page(data):
             location_list = data["LOCATIONS"]['사업장명'].tolist()
             upload_location = st.selectbox("2. 데이터를 귀속시킬 사업장을 선택하세요.", location_list)
             uploaded_file = st.file_uploader("3. 해당 포맷의 파일을 업로드하세요.", type=["xlsx", "xls", "csv"])
-
             if st.button("4. 파일 처리 및 데이터 확인", type="primary", use_container_width=True):
-                if not uploaded_file: st.error("파일을 먼저 업로드해주세요.")
+                if not uploaded_file:
+                    st.error("파일을 먼저 업로드해주세요.")
                 else:
                     with st.spinner("파일을 처리하는 중입니다..."):
                         df_raw = None
                         try:
                             if uploaded_file.name.endswith('.csv'):
-                                try: df_raw = pd.read_csv(uploaded_file, encoding='utf-8', header=None)
-                                except UnicodeDecodeError: uploaded_file.seek(0); df_raw = pd.read_csv(uploaded_file, encoding='cp949', header=None)
-                            else: df_raw = pd.read_excel(uploaded_file, header=None)
+                                try:
+                                    df_raw = pd.read_csv(uploaded_file, encoding='utf-8', header=None)
+                                except UnicodeDecodeError:
+                                    uploaded_file.seek(0)
+                                    df_raw = pd.read_csv(uploaded_file, encoding='cp949', header=None)
+                            else:
+                                df_raw = pd.read_excel(uploaded_file, header=None)
                         except Exception as e:
                             st.error(f"파일을 읽는 중 오류가 발생했습니다: {e}")
                             return
-
-                        if df_raw is None: st.error("지원하지 않는 파일 형식입니다."); return
-                        
+                        if df_raw is None:
+                            st.error("지원하지 않는 파일 형식입니다.")
+                            return
                         df_parsed = pd.DataFrame()
-                        if selected_format_name == "OKPOS 매출": df_parsed = parse_okpos(df_raw)
-                        elif selected_format_name == "우리은행 지출": df_parsed = parse_woori_bank(df_raw)
-                        
-                        if df_parsed.empty: st.warning("파일에서 처리할 데이터를 찾지 못했습니다."); return
-                        
+                        if selected_format_name == "OKPOS 매출":
+                            df_parsed = parse_okpos(df_raw)
+                        elif selected_format_name == "우리은행 지출":
+                            df_parsed = parse_woori_bank(df_raw)
+                        if df_parsed.empty:
+                            st.warning("파일에서 처리할 데이터를 찾지 못했습니다.")
+                            return
                         df_final = df_parsed.copy()
                         df_final['사업장명'] = upload_location
                         df_final['구분'] = data["FORMATS"][data["FORMATS"]['포맷명'] == selected_format_name].iloc[0]['데이터구분']
                         df_final['데이터소스'] = selected_format_name
                         df_final['거래ID'] = [str(uuid.uuid4()) for _ in range(len(df_final))]
-
                         if selected_format_name == "OKPOS 매출":
                             def get_okpos_account_id(description):
                                 accounts_df = data["ACCOUNTS"]
                                 account_id = accounts_df.loc[accounts_df['소분류'] == description, '계정ID']
                                 return account_id.iloc[0] if not account_id.empty else ''
-                            
                             df_final['계정ID'] = df_final['거래내용'].apply(get_okpos_account_id)
                             df_final['처리상태'] = '자동등록'
                             st.session_state.okpos_preview_data = df_final
@@ -370,26 +382,23 @@ def render_data_page(data):
             if data["LOCATIONS"].empty:
                 st.warning("`설정 관리` 탭에서 `사업장`을 먼저 추가해주세요.")
             else:
-                edited_inv = st.data_editor(data["INVENTORY"], num_rows="dynamic", use_container_width=True, hide_index=True,
-                    column_config={"사업장명": st.column_config.SelectboxColumn("사업장명", options=data["LOCATIONS"]['사업장명'].tolist(), required=True)})
+                edited_inv = st.data_editor(data["INVENTORY"], num_rows="dynamic", use_container_width=True, hide_index=True, column_config={"사업장명": st.column_config.SelectboxColumn("사업장명", options=data["LOCATIONS"]['사업장명'].tolist(), required=True)})
                 if st.button("💾 월별재고 저장", key="save_inventory"):
-                    if update_sheet(SHEET_NAMES["INVENTORY"], edited_inv): st.success("저장되었습니다."); st.rerun()
-    
+                    if update_sheet(SHEET_NAMES["INVENTORY"], edited_inv):
+                        st.success("저장되었습니다.")
+                        st.rerun()
     elif st.session_state.current_step == 'okpos_preview':
         st.subheader("✅ OKPOS 매출 데이터 미리보기 및 저장")
         df_preview = st.session_state.get('okpos_preview_data', pd.DataFrame())
-
         if df_preview.empty:
             st.warning("미리보기할 데이터가 없습니다. 이전 단계로 돌아가세요.")
         else:
             st.dataframe(df_preview[['거래일자', '거래내용', '금액', '계정ID']], use_container_width=True, hide_index=True)
-
         col1, col2 = st.columns(2)
         if col1.button("🔙 이전 단계로"):
             del st.session_state.okpos_preview_data
             st.session_state.current_step = 'upload'
             st.rerun()
-        
         if col2.button("💾 최종 저장하기", type="primary"):
             if (df_preview['계정ID'] == '').any():
                 st.error("계정과목_마스터에 OKPOS 매출 항목(OKPOS 홀매출 등)이 등록되지 않았거나, 이름이 다릅니다.")
@@ -401,11 +410,9 @@ def render_data_page(data):
                         del st.session_state.okpos_preview_data
                         st.session_state.current_step = 'upload'
                         st.rerun()
-
     elif st.session_state.current_step == 'confirm':
         st.subheader("✅ 1단계: 확인 및 확정")
         df_processed = st.session_state.get('df_processed', pd.DataFrame())
-        
         df_duplicates = pd.DataFrame()
         if not df_processed.empty and df_processed['구분'].iloc[0] == '비용':
             existing = data["TRANSACTIONS"]
@@ -414,29 +421,24 @@ def render_data_page(data):
                 df_processed['duplicate_key'] = df_processed['사업장명'] + df_processed['거래내용'] + df_processed['금액'].astype(str)
                 df_duplicates = df_processed[df_processed['duplicate_key'].isin(existing['duplicate_key'])]
                 df_processed = df_processed[~df_processed['duplicate_key'].isin(existing['duplicate_key'])]
-        
         df_processed = auto_categorize(df_processed, data["RULES"])
         df_auto = df_processed[df_processed['처리상태'] == '자동분류']
         df_manual = df_processed[df_processed['처리상태'] == '미분류']
-
         if not df_duplicates.empty:
             with st.expander(f"⚠️ **{len(df_duplicates)}건의 중복 의심 거래**가 발견되었습니다."):
                 st.dataframe(df_duplicates[['거래일자', '거래내용', '금액']])
-        
         if not df_auto.empty:
             with st.expander(f"🤖 **{len(df_auto)}**건이 자동으로 분류됩니다."):
                 df_auto_display = pd.merge(df_auto, data["ACCOUNTS"], on="계정ID", how="left")
                 st.dataframe(df_auto_display[['거래일자', '거래내용', '금액', '대분류', '소분류']], hide_index=True)
-
         col1, col2 = st.columns(2)
         if col1.button("🔙 이전 단계로"):
-            st.session_state.current_step = 'upload'; st.rerun()
-
+            st.session_state.current_step = 'upload'
+            st.rerun()
         if col2.button("2단계: 분류 작업대 열기 ➡️", type="primary"):
             st.session_state.workbench_data = pd.concat([df_auto, df_manual], ignore_index=True).drop(columns=['duplicate_key'], errors='ignore')
             st.session_state.current_step = 'workbench'
             st.rerun()
-
     elif st.session_state.current_step == 'workbench':
         if 'workbench_data' not in st.session_state or st.session_state.workbench_data.empty:
             st.success("모든 내역 처리가 완료되었습니다.")
@@ -444,70 +446,44 @@ def render_data_page(data):
                 st.session_state.current_step = 'upload'
                 st.rerun()
             return
-
         st.subheader(f"✍️ 분류 작업대 (남은 내역: {len(st.session_state.workbench_data)}건)")
         st.info("계정과목이 지정된 항목은 저장 버튼 클릭 시 자동으로 저장됩니다.")
-        
         accounts_df = data["ACCOUNTS"]
         account_options = [""] + [f"[{r['대분류']}/{r['소분류']}] ({r['계정ID']})" for _, r in accounts_df.iterrows()]
         account_map = {f"[{r['대분류']}/{r['소분류']}] ({r['계정ID']})": r['계정ID'] for _, r in accounts_df.iterrows()}
         id_to_account = {v: k for k, v in account_map.items()}
-
         df_original_workbench = st.session_state.workbench_data.copy()
-        
         df_display = pd.DataFrame()
         df_display['거래일자'] = pd.to_datetime(df_original_workbench['거래일자']).dt.normalize()
         df_display['거래내용'] = df_original_workbench['거래내용']
         df_display['금액'] = df_original_workbench['금액']
         df_display['계정과목_선택'] = df_original_workbench['계정ID'].map(id_to_account).fillna("")
-        
-        edited_df = st.data_editor(
-            df_display,
-            hide_index=True, use_container_width=True, key="workbench_editor", num_rows="dynamic",
-            column_config={
-                "거래일자": st.column_config.DateColumn("거래일자", format="YYYY-MM-DD"),
-                "거래내용": st.column_config.TextColumn("거래내용"),
-                "금액": st.column_config.NumberColumn("금액", format="%.0f"),
-                "계정과목_선택": st.column_config.SelectboxColumn("계정과목 선택", options=account_options)
-            }
-        )
-
+        edited_df = st.data_editor(df_display, hide_index=True, use_container_width=True, key="workbench_editor", num_rows="dynamic", column_config={"거래일자": st.column_config.DateColumn("거래일자", format="YYYY-MM-DD"), "거래내용": st.column_config.TextColumn("거래내용"), "금액": st.column_config.NumberColumn("금액", format="%.0f"), "계정과목_선택": st.column_config.SelectboxColumn("계정과목 선택", options=account_options)})
         st.markdown("---")
         if st.button("💾 저장하기", type="primary"):
-            current_state_df = pd.concat([
-                df_original_workbench.drop(columns=['거래일자', '거래내용', '금액', '계정ID']).reset_index(drop=True),
-                edited_df.reset_index(drop=True)
-            ], axis=1)
-            
+            current_state_df = pd.concat([df_original_workbench.drop(columns=['거래일자', '거래내용', '금액', '계정ID']).reset_index(drop=True), edited_df.reset_index(drop=True)], axis=1)
             is_complete = current_state_df['계정과목_선택'].notna() & (current_state_df['계정과목_선택'] != "")
             df_to_process = current_state_df[is_complete].copy()
             df_to_keep = current_state_df[~is_complete].copy()
-
             if df_to_process.empty:
                 st.info("저장할 항목이 없습니다. (계정과목이 지정된 항목이 저장 대상입니다)")
             else:
                 df_to_process['계정ID'] = df_to_process['계정과목_선택'].map(account_map)
-                
                 original_accounts = df_original_workbench['계정ID'].map(id_to_account).fillna("")
                 edited_accounts = df_to_process['계정과목_선택']
                 is_changed = original_accounts.reindex(edited_accounts.index) != edited_accounts
-                
                 df_to_process.loc[is_changed, '처리상태'] = '수동확인'
-                
                 with st.spinner(f"{len(df_to_process)}건의 항목을 저장하는 중입니다..."):
                     final_cols = data["TRANSACTIONS"].columns
                     df_saved = df_to_process.reindex(columns=final_cols).fillna('')
-
                     combined_trans = pd.concat([data["TRANSACTIONS"], df_saved], ignore_index=True)
                     if update_sheet(SHEET_NAMES["TRANSACTIONS"], combined_trans):
                         st.success(f"{len(df_saved)}건을 성공적으로 저장했습니다.")
-                        
                         if df_to_keep.empty:
                             if 'workbench_data' in st.session_state:
                                 del st.session_state.workbench_data
                         else:
                             st.session_state.workbench_data = df_original_workbench[df_original_workbench['거래ID'].isin(df_to_keep['거래ID'])].reset_index(drop=True)
-                        
                         st.rerun()
 
 def render_settings_page(data):
