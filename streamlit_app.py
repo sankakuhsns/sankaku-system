@@ -105,7 +105,6 @@ def update_sheet(sheet_name, df):
         spreadsheet = get_gspread_client().open_by_key(spreadsheet_key)
         worksheet = spreadsheet.worksheet(sheet_name)
         worksheet.clear()
-        # 날짜 형식 명시적으로 변환하여 저장
         if '거래일자' in df.columns:
             df['거래일자'] = pd.to_datetime(df['거래일자']).dt.strftime('%Y-%m-%d')
         df_str = df.astype(str).replace('nan', '').replace('NaT', '')
@@ -128,7 +127,7 @@ def login_screen():
         username, password = st.text_input("아이디"), st.text_input("비밀번호", type="password")
         if st.form_submit_button("로그인", use_container_width=True):
             if username == admin_id and password == admin_pw: st.session_state['logged_in'] = True; st.rerun()
-            else: st.error("아이디 또는 비밀번호가 올바르지 않습니다.")
+            else: st.error("아이디 또는 비밀번호가 올바라지 않습니다.")
 
 def auto_categorize(df, rules_df):
     if rules_df.empty: return df
@@ -336,21 +335,22 @@ def render_data_page(data):
         id_to_account = {v: k for k, v in account_map.items()}
 
         df_original_workbench = st.session_state.workbench_data.copy()
-        df_display = df_original_workbench.copy()
         
-        # --- BUG FIX: 날짜에서 시간 정보 제거 ---
-        df_display['거래일자'] = pd.to_datetime(df_display['거래일자']).dt.normalize()
-        df_display['계정과목_선택'] = df_display['계정ID'].map(id_to_account).fillna("")
+        # 원본 데이터에서 UI 표시용 데이터프레임 생성
+        df_display = pd.DataFrame()
+        df_display['거래일자'] = pd.to_datetime(df_original_workbench['거래일자']).dt.normalize()
+        df_display['거래내용'] = df_original_workbench['거래내용']
+        df_display['금액'] = df_original_workbench['금액']
+        df_display['계정과목_선택'] = df_original_workbench['계정ID'].map(id_to_account).fillna("")
         
         # --- Data Editor UI ---
         edited_df = st.data_editor(
-            df_display[['거래일자', '거래내용', '금액', '계정과목_선택']],
+            df_display,
             hide_index=True, use_container_width=True, key="workbench_editor", num_rows="dynamic",
-            # --- BUG FIX: 계정과목 ID 표시 및 드롭다운 복원 ---
             column_config={
                 "거래일자": st.column_config.DateColumn("거래일자", format="YYYY-MM-DD"),
                 "거래내용": st.column_config.TextColumn("거래내용"),
-                "금액": st.column_config.NumberColumn("금액"),
+                "금액": st.column_config.NumberColumn("금액", format="%.0f"),
                 "계정과목_선택": st.column_config.SelectboxColumn("계정과목 선택", options=account_options)
             }
         )
@@ -359,66 +359,64 @@ def render_data_page(data):
         if st.button("💾 변경된 내용 저장하기", type="primary", use_container_width=True):
             # --- 부분 저장 로직 (재설계) ---
             
-            # 1. 원본/수정본 데이터 정제 및 병합
-            df_original_workbench['계정과목_선택'] = df_original_workbench['계정ID'].map(id_to_account).fillna("")
-            df_original_workbench['거래일자'] = pd.to_datetime(df_original_workbench['거래일자']).dt.normalize()
+            # 1. 원본 데이터에 거래ID를 인덱스로 설정하여 비교 기준 마련
+            original_with_index = df_original_workbench.set_index('거래ID')
             
-            edited_df['거래일자'] = pd.to_datetime(edited_df['거래일자']).dt.normalize()
+            # 2. 편집된 데이터에 원본 거래ID를 다시 붙여주기 (삭제된 행은 여기서 제외됨)
+            edited_with_ids = edited_df.copy()
+            # 편집기에서 행이 삭제되지 않았을 경우에만 ID를 붙여줌
+            if len(edited_with_ids) >= len(original_with_index):
+                edited_with_ids['거래ID'] = original_with_index.index.tolist() + [None] * (len(edited_with_ids) - len(original_with_index))
+            else: # 행이 삭제된 경우, 인덱스를 기준으로 매칭 (한계점 존재)
+                st.warning("행 삭제 기능은 현재 지원되지 않습니다. 삭제를 원하시면 내용을 비워주세요.")
+                edited_with_ids['거래ID'] = original_with_index.index.tolist()[:len(edited_with_ids)]
             
-            # 비교를 위해 원본의 거래ID를 인덱스로 사용
-            df_merged = df_original_workbench.set_index('거래ID').join(
-                edited_df.rename(columns=lambda c: f"{c}_ed"),
-                how='outer'
-            )
-            
-            # 2. 변경 여부 확인
-            # np.isclose은 숫자 타입 비교, 나머지는 직접 비교
-            numeric_cols_equal = np.isclose(df_merged['금액'], df_merged['금액_ed'])
-            other_cols_equal = (df_merged['거래일자'] == df_merged['거래일자_ed']) & \
-                               (df_merged['거래내용'] == df_merged['거래내용_ed']) & \
-                               (df_merged['계정과목_선택'] == df_merged['계정과목_선택_ed'])
-            
-            is_changed = ~ (numeric_cols_equal & other_cols_equal)
-            
-            # 3. 저장 가능 여부 확인 (완성도)
-            is_complete = (df_merged['계정과목_선택_ed'] != "") & \
-                          df_merged['거래일자_ed'].notna() & \
-                          df_merged['금액_ed'].notna()
+            edited_with_index = edited_with_ids.set_index('거래ID')
 
-            # 4. 저장/유지/경고 대상 선정
-            to_save_ids = df_merged[is_changed & is_complete].index
-            to_keep_ids = df_merged[~is_changed | (is_changed & ~is_complete)].index
-            incomplete_edits_exist = is_changed[is_changed & ~is_complete].any()
+            # 3. 저장할 행과 남길 행 결정
+            rows_to_save = []
+            rows_to_keep_ids = []
+            
+            for trans_id, original_row in original_with_index.iterrows():
+                if trans_id not in edited_with_index.index: # 행이 삭제된 경우 (논리적으로는 무시)
+                    continue
 
-            if incomplete_edits_exist:
-                st.warning("⚠️ 일부 수정되었지만 내용이 불완전한 항목은 저장되지 않고 작업대에 남습니다.")
+                edited_row = edited_with_index.loc[trans_id]
+                original_display_account = id_to_account.get(original_row['계정ID'], "")
 
-            if to_save_ids.empty:
+                # 원본과 수정본 비교
+                is_changed = not (pd.to_datetime(original_row['거래일자']).normalize() == edited_row['거래일자'] and \
+                                  original_row['거래내용'] == edited_row['거래내용'] and \
+                                  np.isclose(original_row['금액'], edited_row['금액']) and \
+                                  original_display_account == edited_row['계정과목_선택'])
+
+                is_complete = edited_row['계정과목_선택'] != "" and pd.notna(edited_row['거래일자']) and pd.notna(edited_row['금액'])
+
+                if is_changed and is_complete:
+                    row_to_save = original_row.copy()
+                    row_to_save['거래일자'] = edited_row['거래일자']
+                    row_to_save['거래내용'] = edited_row['거래내용']
+                    row_to_save['금액'] = edited_row['금액']
+                    row_to_save['계정ID'] = account_map[edited_row['계정과목_선택']]
+                    row_to_save['처리상태'] = '수동확인'
+                    rows_to_save.append(row_to_save)
+                else:
+                    rows_to_keep_ids.append(trans_id)
+
+            # 새롭게 추가된 행 처리 (현재 로직에서는 지원하지 않음)
+            
+            if not rows_to_save:
                 st.info("저장할 만큼 충분히 수정된 항목이 없습니다.")
             else:
-                # 5. 데이터 처리 및 저장
-                df_to_save = df_merged.loc[to_save_ids].copy()
-                df_to_save.reset_index(inplace=True)
-
-                # 수정된 값으로 최종 데이터 업데이트
-                df_to_save['거래일자'] = df_to_save['거래일자_ed']
-                df_to_save['거래내용'] = df_to_save['거래내용_ed']
-                df_to_save['금액'] = df_to_save['금액_ed']
-                df_to_save['계정ID'] = df_to_save['계정과목_선택_ed'].map(account_map)
-                df_to_save['처리상태'] = '수동확인'
-
-                # 최종 시트에 맞게 컬럼 정리
-                final_cols = data["TRANSACTIONS"].columns
-                df_to_save = df_to_save[final_cols]
-
+                df_to_save = pd.DataFrame(rows_to_save)
+                
                 with st.spinner(f"{len(df_to_save)}건의 항목을 저장하는 중입니다..."):
                     combined_trans = pd.concat([data["TRANSACTIONS"], df_to_save], ignore_index=True)
                     if update_sheet(SHEET_NAMES["TRANSACTIONS"], combined_trans):
                         st.success(f"{len(df_to_save)}건을 성공적으로 저장했습니다.")
                         
-                        # 작업대에 남길 데이터 업데이트
-                        if not to_keep_ids.empty:
-                            st.session_state.workbench_data = st.session_state.workbench_data[st.session_state.workbench_data['거래ID'].isin(to_keep_ids)]
+                        if rows_to_keep_ids:
+                            st.session_state.workbench_data = df_original_workbench[df_original_workbench['거래ID'].isin(rows_to_keep_ids)].reset_index(drop=True)
                         else:
                             del st.session_state.workbench_data
                         
@@ -481,4 +479,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
