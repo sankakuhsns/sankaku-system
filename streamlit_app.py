@@ -6,6 +6,7 @@ from datetime import datetime
 from dateutil.relativedelta import relativedelta
 import uuid
 import re
+import numpy as np
 
 # =============================================================================
 # 0. 기본 설정 및 상수 정의
@@ -147,7 +148,9 @@ def calculate_pnl(transactions_df, inventory_df, accounts_df, selected_month, se
         transactions_df = transactions_df[transactions_df['사업장명'] == selected_location]
         if not inventory_df.empty and all(col in inventory_df.columns for col in required_cols['inventory']):
             inventory_df = inventory_df[inventory_df['사업장명'] == selected_location]
-    transactions_df['거래일자'] = pd.to_datetime(transactions_df['거래일자'])
+    
+    transactions_df['거래일자'] = pd.to_datetime(transactions_df['거래일자'], errors='coerce')
+    
     month_trans = transactions_df[transactions_df['거래일자'].dt.strftime('%Y-%m') == selected_month].copy()
     if month_trans.empty: return pd.DataFrame(), {}, pd.DataFrame()
     pnl_data = pd.merge(month_trans, accounts_df, on='계정ID', how='left')
@@ -211,9 +214,8 @@ def render_data_page(data):
         st.subheader("🏢 데이터 현황")
         if data["TRANSACTIONS"].empty: st.info("아직 등록된 거래내역이 없습니다. 아래에서 파일을 업로드해주세요.")
         else:
-            # Note: Ensure '거래일자' is datetime for correct min/max, otherwise it's lexical sort
             trans_df_copy = data["TRANSACTIONS"].copy()
-            trans_df_copy['거래일자'] = pd.to_datetime(trans_df_copy['거래일자'])
+            trans_df_copy['거래일자'] = pd.to_datetime(trans_df_copy['거래일자'], errors='coerce')
             summary = trans_df_copy.groupby(['사업장명', '데이터소스']).agg(
                 건수=('거래ID', 'count'), 
                 최초거래일=('거래일자', 'min'), 
@@ -260,15 +262,16 @@ def render_data_page(data):
                         df_final = df_parsed.copy()
                         df_final.loc[:, '사업장명'] = upload_location
                         df_final.loc[:, '구분'] = data["FORMATS"][data["FORMATS"]['포맷명'] == selected_format_name].iloc[0]['데이터구분']
-                        df_final.loc[:, '데이터소스'] = selected_format_name; df_final.loc[:, '처리상태'] = '미분류'
-                        df_final.loc[:, '계정ID'] = ''; df_final.loc[:, '거래ID'] = [str(uuid.uuid4()) for _ in range(len(df_final))]
+                        df_final.loc[:, '데이터소스'] = selected_format_name
+                        df_final.loc[:, '처리상태'] = '미분류'
+                        df_final.loc[:, '계정ID'] = ''
+                        df_final.loc[:, '거래ID'] = [str(uuid.uuid4()) for _ in range(len(df_final))]
                         
                         st.session_state.df_processed = df_final
                         st.session_state.current_step = 'confirm'
                         st.rerun()
         with tab2:
             st.subheader("월별재고 관리")
-            # ❗️ FIX 1: Check if locations exist before rendering the editor
             if data["LOCATIONS"].empty:
                 st.warning("`설정 관리` 탭에서 `사업장`을 먼저 추가해주세요.")
             else:
@@ -281,7 +284,6 @@ def render_data_page(data):
         st.subheader("✅ 1단계: 확인 및 확정")
         df_processed = st.session_state.get('df_processed', pd.DataFrame())
         
-        # 지능형 중복 검사
         df_duplicates = pd.DataFrame()
         if not df_processed.empty and df_processed['구분'].iloc[0] == '비용':
             existing = data["TRANSACTIONS"]
@@ -317,80 +319,130 @@ def render_data_page(data):
         if 'workbench_data' not in st.session_state or st.session_state.workbench_data.empty:
             st.success("모든 내역 처리가 완료되었습니다.")
             if st.button("초기 화면으로 돌아가기", use_container_width=True):
-                st.session_state.current_step = 'upload'; st.rerun()
+                st.session_state.current_step = 'upload'
+                st.rerun()
             return
 
-        df_workbench = st.session_state.workbench_data
-        st.subheader(f"✍️ 분류 작업대 (남은 내역: {len(df_workbench)}건)")
-        st.info("이곳에서 거래일자를 수정하거나, 행을 추가/삭제하고, 계정과목을 지정할 수 있습니다.")
+        st.subheader(f"✍️ 분류 작업대 (남은 내역: {len(st.session_state.workbench_data)}건)")
+        st.info("변경을 원하는 행의 계정과목을 지정하고 저장하세요. 일부만 처리할 수 있습니다.")
         
         accounts_df = data["ACCOUNTS"]
         account_options = [""] + [f"[{r['대분류']}/{r['소분류']}] ({r['계정ID']})" for _, r in accounts_df.iterrows()]
         account_map = {f"[{r['대분류']}/{r['소분류']}] ({r['계정ID']})": r['계정ID'] for _, r in accounts_df.iterrows()}
+        id_to_account = {v: k for k, v in account_map.items()}
+
+        # 원본 데이터 복사 및 UI 표시용 데이터 준비
+        df_original_workbench = st.session_state.workbench_data.copy()
+        df_display = df_original_workbench.copy()
+        df_display['거래일자'] = pd.to_datetime(df_display['거래일자'])
+        df_display['계정과목_선택'] = df_display['계정ID'].map(id_to_account).fillna("")
         
-        required_display_cols = ['거래일자', '거래내용', '금액', '계정과목_선택']
-        for col in required_display_cols:
-            if col not in df_workbench.columns:
-                df_workbench[col] = ""
-        
-        df_workbench['계정과목_선택'] = df_workbench.apply(
-            lambda row: {v: k for k, v in account_map.items()}.get(row['계정ID'], ""), axis=1
+        edited_df = st.data_editor(
+            df_display[['거래일자', '거래내용', '금액', '계정과목_선택']],
+            hide_index=True, use_container_width=True, key="workbench_editor", num_rows="dynamic"
         )
-        
-        df_workbench['거래일자'] = pd.to_datetime(df_workbench['거래일자'])
-        
-        edited_workbench = st.data_editor(df_workbench[required_display_cols],
-            hide_index=True, use_container_width=True, key="workbench_editor", num_rows="dynamic",
-            column_config={
-                # ❗️ FIX 2: Removed required=True to prevent crash when adding new rows
-                "거래일자": st.column_config.DateColumn("거래일자", format="YYYY-MM-DD"),
-                "거래내용": st.column_config.TextColumn("거래내용"),
-                "금액": st.column_config.NumberColumn("금액"),
-                "계정과목_선택": st.column_config.SelectboxColumn("계정과목 선택", options=account_options)
-            })
 
         st.markdown("---")
-        if st.button("💾 작업 내용 최종 저장하기", type="primary", use_container_width=True):
-            # Perform validation check here instead of in the config
-            if edited_workbench['계정과목_선택'].eq("").any() or edited_workbench['거래일자'].isnull().any() or edited_workbench['금액'].isnull().any():
-                st.error("모든 항목의 `거래일자`, `금액`, `계정과목`을 입력 혹은 선택해야 저장이 가능합니다.")
-            else:
-                # data_editor의 변경사항을 원본 데이터프레임에 안전하게 병합
-                edited_ids = [st.session_state.workbench_data.iloc[i]['거래ID'] for i, r in enumerate(edited_workbench.to_dict('records')) if i < len(st.session_state.workbench_data)]
-                new_row_data = [r for i, r in enumerate(edited_workbench.to_dict('records')) if i >= len(st.session_state.workbench_data)]
-                
-                edited_df_with_ids = edited_workbench.iloc[:len(edited_ids)].copy()
-                edited_df_with_ids['거래ID'] = edited_ids
+        if st.button("💾 변경된 내용 저장하기", type="primary", use_container_width=True):
+            # 비교를 위해 원본 데이터의 타입도 UI와 동일하게 맞춤
+            df_original_workbench['계정과목_선택'] = df_original_workbench['계정ID'].map(id_to_account).fillna("")
+            df_original_workbench['거래일자'] = pd.to_datetime(df_original_workbench['거래일자']).dt.normalize()
+            df_original_workbench['금액'] = pd.to_numeric(df_original_workbench['금액'], errors='coerce')
 
-                final_to_save = st.session_state.workbench_data.copy()
-                final_to_save = final_to_save.set_index('거래ID')
-                edited_df_with_ids = edited_df_with_ids.set_index('거래ID')
-                final_to_save.update(edited_df_with_ids)
-                final_to_save = final_to_save.reset_index()
+            # 편집된 데이터 타입 정리
+            edited_df['거래일자'] = pd.to_datetime(edited_df['거래일자']).dt.normalize()
+            edited_df['금액'] = pd.to_numeric(edited_df['금액'], errors='coerce')
+            
+            rows_to_save_indices = []
+            rows_to_keep_indices = []
+            incomplete_rows_exist = False
 
-                # Process and add new rows
-                if new_row_data:
-                    new_rows_df = pd.DataFrame(new_row_data)
-                    # Get metadata from the first row of original data
-                    first_row = st.session_state.workbench_data.iloc[0]
-                    new_rows_df['사업장명'] = first_row['사업장명']
-                    new_rows_df['구분'] = first_row['구분']
-                    new_rows_df['데이터소스'] = first_row['데이터소스']
-                    new_rows_df['거래ID'] = [str(uuid.uuid4()) for _ in range(len(new_rows_df))]
-                    final_to_save = pd.concat([final_to_save, new_rows_df], ignore_index=True)
-
-                final_to_save['계정ID'] = final_to_save['계정과목_선택'].map(account_map)
-                final_to_save['처리상태'] = '수동확인'
+            # 변경된 행과 신규 행 식별
+            for i in edited_df.index:
+                is_new_row = i not in df_original_workbench.index
                 
-                final_to_save = final_to_save.drop(columns=['계정과목_선택'])
-                
-                combined_trans = pd.concat([data["TRANSACTIONS"], final_to_save], ignore_index=True)
-                if update_sheet(SHEET_NAMES["TRANSACTIONS"], combined_trans):
-                    st.success("작업 내용이 성공적으로 저장되었습니다.")
-                    st.session_state.current_step = 'upload'
-                    if 'workbench_data' in st.session_state: del st.session_state['workbench_data']
-                    st.rerun()
+                if is_new_row:
+                    edited_row = edited_df.loc[i]
+                    # 완전히 비어있는 새 행은 무시
+                    if pd.isna(edited_row['거래일자']) and pd.isna(edited_row['금액']) and edited_row['거래내용'] == "" and edited_row['계정과목_선택'] == "":
+                        continue
                     
+                    is_complete = edited_row['계정과목_선택'] != "" and pd.notna(edited_row['거래일자']) and pd.notna(edited_row['금액']) and edited_row['거래내용'] != ""
+                    if is_complete:
+                        rows_to_save_indices.append(i)
+                    else:
+                        rows_to_keep_indices.append(i)
+                        incomplete_rows_exist = True
+                else: # 기존 행
+                    original_row = df_original_workbench.loc[i]
+                    edited_row = edited_df.loc[i]
+                    
+                    # 어느 한 값이라도 다르면 '수정된 행'으로 간주
+                    if not original_row[['거래일자', '거래내용', '금액', '계정과목_선택']].equals(edited_row):
+                        is_complete = edited_row['계정과목_선택'] != "" and pd.notna(edited_row['거래일자']) and pd.notna(edited_row['금액'])
+                        if is_complete:
+                            rows_to_save_indices.append(i)
+                        else:
+                            rows_to_keep_indices.append(i)
+                            incomplete_rows_exist = True
+                    else: # 수정 안 된 행
+                        rows_to_keep_indices.append(i)
+
+            # 메시지 및 데이터 처리
+            if incomplete_rows_exist:
+                st.warning("⚠️ 내용이 일부만 채워진 행은 저장되지 않고 작업대에 남습니다.")
+
+            if not rows_to_save_indices:
+                st.info("저장할 만큼 충분히 수정된 항목이 없습니다.")
+            else:
+                # 저장할 데이터 준비
+                df_to_save = st.session_state.workbench_data.iloc[rows_to_save_indices[rows_to_save_indices < len(st.session_state.workbench_data)]].copy()
+                edited_rows_for_save = edited_df.loc[rows_to_save_indices]
+                df_to_save['계정ID'] = edited_rows_for_save['계정과목_선택'].map(account_map)
+                df_to_save['거래일자'] = edited_rows_for_save['거래일자'].dt.strftime('%Y-%m-%d')
+                df_to_save['거래내용'] = edited_rows_for_save['거래내용']
+                df_to_save['금액'] = edited_rows_for_save['금액']
+                df_to_save['처리상태'] = '수동확인'
+
+                # 신규 추가된 행 처리
+                new_rows_to_save_indices = [i for i in rows_to_save_indices if i >= len(st.session_state.workbench_data)]
+                if new_rows_to_save_indices:
+                    new_rows_df = edited_df.loc[new_rows_to_save_indices].copy()
+                    first_row_meta = st.session_state.workbench_data.iloc[0]
+                    new_rows_df['사업장명'] = first_row_meta['사업장명']
+                    new_rows_df['구분'] = first_row_meta['구분']
+                    new_rows_df['데이터소스'] = first_row_meta['데이터소스']
+                    new_rows_df['거래ID'] = [str(uuid.uuid4()) for _ in range(len(new_rows_df))]
+                    new_rows_df['계정ID'] = new_rows_df['계정과목_선택'].map(account_map)
+                    new_rows_df['처리상태'] = '수동확인'
+                    df_to_save = pd.concat([df_to_save, new_rows_df], ignore_index=True)
+
+                # 시트 업데이트
+                final_cols = data["TRANSACTIONS"].columns
+                df_to_save = df_to_save.reindex(columns=final_cols).fillna('')
+                
+                with st.spinner(f"{len(df_to_save)}건의 항목을 저장하는 중입니다..."):
+                    combined_trans = pd.concat([data["TRANSACTIONS"], df_to_save], ignore_index=True)
+                    if update_sheet(SHEET_NAMES["TRANSACTIONS"], combined_trans):
+                        st.success(f"{len(df_to_save)}건을 성공적으로 저장했습니다.")
+                        
+                        # 작업대에 남길 데이터 업데이트
+                        if rows_to_keep_indices:
+                            remaining_df = edited_df.loc[rows_to_keep_indices].copy()
+                            # 원본에서 메타데이터 복원
+                            original_meta = st.session_state.workbench_data.loc[
+                                [i for i in rows_to_keep_indices if i < len(st.session_state.workbench_data)],
+                                ['거래ID', '사업장명', '구분', '데이터소스', '처리상태']
+                            ]
+                            for col in original_meta.columns:
+                                remaining_df[col] = original_meta[col]
+                            
+                            st.session_state.workbench_data = remaining_df.reset_index(drop=True)
+                        else:
+                            del st.session_state.workbench_data
+                        
+                        st.rerun()
+
 def render_settings_page(data):
     st.header("⚙️ 설정 관리")
     tab1, tab2, tab3, tab4 = st.tabs(["🏢 사업장 관리", "📚 계정과목 관리", "🤖 자동분류 규칙", "📄 파일 포맷 관리"])
@@ -432,10 +484,15 @@ def main():
         
         st.sidebar.markdown("---")
         if st.sidebar.button("🔃 데이터 새로고침"):
-            for key in list(st.session_state.keys()):
-                if key != 'logged_in': del st.session_state[key]
-            st.cache_data.clear(); st.rerun()
-        if st.sidebar.button("로그아웃"): st.session_state.clear(); st.rerun()
+            keys_to_delete = [k for k in st.session_state.keys() if k != 'logged_in']
+            for key in keys_to_delete:
+                del st.session_state[key]
+            st.cache_data.clear()
+            st.rerun()
+
+        if st.sidebar.button("로그아웃"): 
+            st.session_state.clear()
+            st.rerun()
             
         if choice == "📅 월별 정산표": render_pnl_page(data)
         elif choice == "✍️ 데이터 관리": render_data_page(data)
@@ -443,4 +500,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
