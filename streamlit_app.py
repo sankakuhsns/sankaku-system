@@ -7,6 +7,7 @@ from dateutil.relativedelta import relativedelta
 import uuid
 import re
 import numpy as np
+import plotly.express as px
 
 # =============================================================================
 # 0. 기본 설정 및 상수 정의
@@ -145,20 +146,26 @@ def auto_categorize(df, rules_df):
 def calculate_pnl(transactions_df, inventory_df, accounts_df, selected_month, selected_location):
     required_cols = {'transactions': ['사업장명', '거래일자', '계정ID', '금액'], 'inventory': ['사업장명', '기준년월', '기말재고액']}
     if transactions_df.empty or not all(col in transactions_df.columns for col in required_cols['transactions']):
-        return pd.DataFrame(), {}, pd.DataFrame()
+        return None, None, None
+
     if selected_location != "전체":
         transactions_df = transactions_df[transactions_df['사업장명'] == selected_location]
         if not inventory_df.empty and all(col in inventory_df.columns for col in required_cols['inventory']):
             inventory_df = inventory_df[inventory_df['사업장명'] == selected_location]
     
     transactions_df['거래일자'] = pd.to_datetime(transactions_df['거래일자'], errors='coerce')
-    
     month_trans = transactions_df[transactions_df['거래일자'].dt.strftime('%Y-%m') == selected_month].copy()
-    if month_trans.empty: return pd.DataFrame(), {}, pd.DataFrame()
+    
+    if month_trans.empty:
+        return {}, {}, pd.DataFrame()
+
     pnl_data = pd.merge(month_trans, accounts_df, on='계정ID', how='left')
     pnl_summary = pnl_data.groupby(['대분류', '소분류'])['금액'].sum().reset_index()
+
+    # --- 계산 ---
     sales = pnl_summary[pnl_summary['대분류'].str.contains('매출', na=False)]['금액'].sum()
     cogs_purchase = pnl_summary[pnl_summary['대분류'].str.contains('원가', na=False)]['금액'].sum()
+    
     begin_inv, end_inv = 0, 0
     if not inventory_df.empty and all(col in inventory_df.columns for col in required_cols['inventory']):
         prev_month = (datetime.strptime(selected_month + '-01', '%Y-%m-%d') - relativedelta(months=1)).strftime('%Y-%m')
@@ -166,22 +173,33 @@ def calculate_pnl(transactions_df, inventory_df, accounts_df, selected_month, se
         begin_inv = begin_inv_data['기말재고액'].sum() if not begin_inv_data.empty else 0
         end_inv_data = inventory_df[inventory_df['기준년월'] == selected_month]
         end_inv = end_inv_data['기말재고액'].sum() if not end_inv_data.empty else 0
+        
     cogs = begin_inv + cogs_purchase - end_inv
     gross_profit = sales - cogs
-    expenses = pnl_summary[~pnl_summary['대분류'].str.contains('매출|원가', na=False)]
-    total_expenses = expenses['금액'].sum()
+    
+    expenses_df = pnl_summary[~pnl_summary['대분류'].str.contains('매출|원가', na=False)]
+    total_expenses = expenses_df['금액'].sum()
     operating_profit = gross_profit - total_expenses
-    pnl_final = pd.DataFrame([{'항목': 'Ⅰ. 총매출', '금액': sales}, {'항목': 'Ⅱ. 매출원가', '금액': cogs}, {'항목': 'Ⅲ. 매출총이익', '금액': gross_profit}])
-    expense_details = []
-    for _, major_cat in expenses.groupby('대분류'):
-        major_sum = major_cat['금액'].sum()
-        expense_details.append({'항목': f'Ⅳ. {major_cat.iloc[0]["대분류"]}', '금액': major_sum})
-        for _, minor_cat in major_cat.iterrows(): expense_details.append({'항목': f' - {minor_cat["소분류"]}', '금액': minor_cat["금액"]})
-    if expense_details: pnl_final = pd.concat([pnl_final, pd.DataFrame(expense_details)], ignore_index=True)
-    pnl_final = pd.concat([pnl_final, pd.DataFrame([{'항목': 'Ⅴ. 영업이익', '금액': operating_profit}])], ignore_index=True)
-    metrics = {"총매출": sales, "매출총이익": gross_profit, "영업이익": operating_profit, "영업이익률": (operating_profit / sales) * 100 if sales > 0 else 0}
-    expense_chart_data = expenses.groupby('대분류')['금액'].sum().reset_index()
-    return pnl_final, metrics, expense_chart_data
+
+    # --- 결과 구조화 ---
+    pnl_structure = {
+        '매출': {'total': sales, 'details': pnl_summary[pnl_summary['대분류'].str.contains('매출', na=False)]},
+        '매출원가': {'total': cogs, 'details': {
+            '기초재고': begin_inv,
+            '당월매입': cogs_purchase,
+            '기말재고': end_inv
+        }},
+        '비용': {'total': total_expenses, 'details': expenses_df.groupby('대분류').apply(lambda x: x.to_dict('records')).to_dict()}
+    }
+    
+    metrics = {
+        "총매출": sales, "매출총이익": gross_profit, "영업이익": operating_profit,
+        "영업이익률": (operating_profit / sales) * 100 if sales > 0 else 0
+    }
+    
+    expense_chart_data = expenses_df.groupby('대분류')['금액'].sum().reset_index()
+    
+    return pnl_structure, metrics, expense_chart_data, pnl_data
 
 # =============================================================================
 # 4. UI 렌더링 함수
@@ -189,23 +207,76 @@ def calculate_pnl(transactions_df, inventory_df, accounts_df, selected_month, se
 def render_pnl_page(data):
     st.header("📅 월별 정산표")
     col1, col2 = st.columns(2)
-    if not data["LOCATIONS"].empty and '사업장명' in data["LOCATIONS"].columns:
-        location_list = ["전체"] + data["LOCATIONS"]['사업장명'].tolist()
-    else: location_list = ["전체"]; st.sidebar.warning("`사업장_마스터`에 데이터를 추가해주세요.")
+    location_list = ["전체"] + data["LOCATIONS"]['사업장명'].tolist() if not data["LOCATIONS"].empty else ["전체"]
     selected_location = col1.selectbox("사업장 선택", location_list)
-    today = datetime.now()
-    month_options = [(today - relativedelta(months=i)).strftime('%Y-%m') for i in range(12)]
+    month_options = [(datetime.now() - relativedelta(months=i)).strftime('%Y-%m') for i in range(12)]
     selected_month = col2.selectbox("조회 년/월 선택", month_options)
     st.markdown("---")
-    if selected_month:
-        pnl_df, metrics, expense_chart_data = calculate_pnl(data["TRANSACTIONS"], data["INVENTORY"], data["ACCOUNTS"], selected_month, selected_location)
-        if pnl_df.empty: st.warning(f"'{selected_location}'의 {selected_month} 데이터가 없습니다.")
-        else:
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("총매출", f"{metrics['총매출']:,.0f} 원"); m2.metric("매출총이익", f"{metrics['매출총이익']:,.0f} 원")
-            m3.metric("영업이익", f"{metrics['영업이익']:,.0f} 원"); m4.metric("영업이익률", f"{metrics['영업이익률']:.1f} %")
-            st.dataframe(pnl_df.style.format({'금액': '{:,.0f}'}), use_container_width=True, hide_index=True)
-            if not expense_chart_data.empty: st.subheader("비용 구성 시각화"); st.bar_chart(expense_chart_data, x='대분류', y='금액')
+
+    if not selected_month:
+        st.stop()
+
+    pnl_structure, metrics, expense_chart_data, pnl_details_df = calculate_pnl(data["TRANSACTIONS"], data["INVENTORY"], data["ACCOUNTS"], selected_month, selected_location)
+
+    if not metrics:
+        st.warning(f"'{selected_location}'의 {selected_month} 데이터가 없습니다.")
+        st.stop()
+    
+    # 1. 핵심 지표
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("총매출", f"{metrics.get('총매출', 0):,.0f} 원")
+    m2.metric("매출총이익", f"{metrics.get('매출총이익', 0):,.0f} 원")
+    m3.metric("영업이익", f"{metrics.get('영업이익', 0):,.0f} 원")
+    m4.metric("영업이익률", f"{metrics.get('영업이익률', 0):.1f} %")
+    st.markdown("---")
+
+    # 2. 계층적 손익계산서
+    st.subheader("손익 요약")
+
+    # 매출
+    with st.expander(f"**Ⅰ. 총매출: {pnl_structure['매출']['total']:,.0f} 원**", expanded=True):
+        st.dataframe(pnl_structure['매출']['details'][['소분류', '금액']].rename(columns={'소분류': '항목'}), use_container_width=True, hide_index=True)
+
+    # 매출원가
+    with st.expander(f"**Ⅱ. 매출원가: {pnl_structure['매출원가']['total']:,.0f} 원**", expanded=True):
+        cogs_details = pnl_structure['매출원가']['details']
+        st.markdown(f"""
+        <div style="padding-left: 20px;">
+            <p>기초재고: {cogs_details['기초재고']:,.0f} 원</p>
+            <p>(+) 당월매입: {cogs_details['당월매입']:,.0f} 원</p>
+            <p>(-) 기말재고: {cogs_details['기말재고']:,.0f} 원</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown(f"#### **Ⅲ. 매출총이익: {metrics.get('매출총이익', 0):,.0f} 원**")
+
+    # 비용 (판매비와관리비)
+    with st.expander(f"**Ⅳ. 총 비용 (판관비): {pnl_structure['비용']['total']:,.0f} 원**", expanded=True):
+        for major_cat, minor_cats in pnl_structure['비용']['details'].items():
+            major_total = sum(item['금액'] for item in minor_cats)
+            with st.expander(f"**{major_cat}: {major_total:,.0f} 원**"):
+                for item in minor_cats:
+                    sub_col1, sub_col2 = st.columns([0.8, 0.2])
+                    sub_col1.markdown(f"- {item['소분류']}: **{item['금액']:,.0f} 원**")
+                    if sub_col2.button("상세 내역 보기", key=f"btn_{item['소분류']}"):
+                        detail_df = pnl_details_df[pnl_details_df['소분류'] == item['소분류']]
+                        st.dataframe(detail_df[['거래일자', '거래내용', '금액']].sort_values('거래일자'), use_container_width=True, hide_index=True)
+    
+    st.markdown(f"--- \n ### **Ⅴ. 영업이익: {metrics.get('영업이익', 0):,.0f} 원**")
+    st.markdown("---")
+
+    # 3. 시각화
+    if not expense_chart_data.empty:
+        st.subheader("비용 구성 시각화")
+        v_col1, v_col2 = st.columns(2)
+        with v_col1:
+            st.markdown("**항목별 비용 비중**")
+            fig_pie = px.pie(expense_chart_data, names='대분류', values='금액', hole=.3)
+            fig_pie.update_traces(textposition='inside', textinfo='percent+label')
+            st.plotly_chart(fig_pie, use_container_width=True)
+        with v_col2:
+            st.markdown("**항목별 비용 금액**")
+            st.bar_chart(expense_chart_data, x='대분류', y='금액')
 
 def render_data_page(data):
     st.header("✍️ 데이터 관리")
@@ -354,12 +425,10 @@ def render_data_page(data):
 
         st.markdown("---")
         if st.button("💾 저장하기", type="primary", use_container_width=True):
-            # 1. 편집 후 데이터에 원본 ID 다시 붙이기
             edited_with_ids = edited_df.copy().reset_index(drop=True)
             original_ids = df_original_workbench['거래ID'].reset_index(drop=True)
             edited_with_ids['거래ID'] = original_ids
             
-            # 2. '완성된 행' 필터링 (계정과목이 지정된 모든 행)
             is_complete = edited_with_ids['계정과목_선택'].notna() & (edited_with_ids['계정과목_선택'] != "")
             
             df_to_process = edited_with_ids[is_complete]
@@ -368,28 +437,23 @@ def render_data_page(data):
             if df_to_process.empty:
                 st.info("저장할 항목이 없습니다. (계정과목이 지정된 항목이 저장 대상입니다)")
             else:
-                # 3. 최종 저장 데이터 생성
                 rows_to_save = []
                 for index, processed_row in df_to_process.iterrows():
                     original_row = df_original_workbench[df_original_workbench['거래ID'] == processed_row['거래ID']].iloc[0]
-                    
                     final_row = original_row.copy()
                     final_row['거래일자'] = processed_row['거래일자']
                     final_row['거래내용'] = processed_row['거래내용']
                     final_row['금액'] = processed_row['금액']
                     final_row['계정ID'] = account_map[processed_row['계정과목_선택']]
                     
-                    # --- 핵심 수정: 계정과목 변경 시에만 '수동확인'으로 변경 ---
                     original_account_selection = id_to_account.get(original_row['계정ID'], "")
                     if original_account_selection != processed_row['계정과목_선택']:
                         final_row['처리상태'] = '수동확인'
-                    # 변경되지 않았으면 원본의 '처리상태'('자동분류' 등)가 그대로 유지됨
                     
                     rows_to_save.append(final_row)
                 
                 df_saved = pd.DataFrame(rows_to_save)
 
-                # 4. 시트 업데이트
                 with st.spinner(f"{len(df_saved)}건의 항목을 저장하는 중입니다..."):
                     final_cols = data["TRANSACTIONS"].columns
                     df_saved = df_saved.reindex(columns=final_cols).fillna('')
@@ -398,7 +462,6 @@ def render_data_page(data):
                     if update_sheet(SHEET_NAMES["TRANSACTIONS"], combined_trans):
                         st.success(f"{len(df_saved)}건을 성공적으로 저장했습니다.")
                         
-                        # 5. 작업대에 남길 데이터 업데이트
                         if df_to_keep_ids.empty:
                             del st.session_state.workbench_data
                         else:
