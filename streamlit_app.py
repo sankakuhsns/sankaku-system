@@ -70,52 +70,48 @@ def parse_okpos(df_raw):
 
 # 기존의 parse_woori_bank 함수를 지우고 아래 내용으로 임시 교체해주세요.
 
+# 기존의 진단용 parse_woori_bank 함수를 지우고 아래 최종 버전으로 붙여넣으세요.
+
 def parse_woori_bank(df_raw):
+    """[최종 수정] 우리은행 거래내역조회 엑셀 파일을 파싱하는 함수.
+    금액에 포함된 쉼표(,)를 제거하는 로직이 추가되었습니다.
     """
-    [진단용 함수] 우리은행 파일의 실제 내용을 확인하기 위한 코드입니다.
-    오류의 원인을 파악한 뒤, 원래의 파싱 코드로 되돌릴 것입니다.
-    """
-    st.subheader("🕵️‍♂️ 우리은행 파일 진단 결과")
-    st.info("아래 내용을 복사하여 회신해주시면, 정확한 원인을 파악하고 해결해 드릴 수 있습니다.")
-
-    # 데이터가 시작되는 5행 (index 4)의 내용을 확인합니다.
-    target_row_index = WOORI_DATA_START_ROW
+    out = []
+    error_rows = []
     
-    if len(df_raw) > target_row_index:
-        row_data = df_raw.iloc[target_row_index]
+    df_data = df_raw.iloc[WOORI_DATA_START_ROW:].copy()
+
+    for index, row in df_data.iterrows():
+        excel_row_num = index + 1
         
-        # 각 컬럼의 실제 값과 데이터 타입을 출력합니다.
-        check_val = row_data.iloc[WOORI_COL_CHECK]
-        datetime_val = row_data.iloc[WOORI_COL_DATETIME]
-        desc_val = row_data.iloc[WOORI_COL_DESC]
-        amount_val = row_data.iloc[WOORI_COL_AMOUNT]
-        
-        st.text(f"""
-        ================ 진단 시작 (엑셀 5행 데이터) ================
-        
-        1. A열 (종료 조건 검사용)
-           - 실제 값: {check_val}
-           - 데이터 타입: {type(check_val)}
+        try:
+            check_val = row.iloc[WOORI_COL_CHECK]
+            if pd.isna(pd.to_numeric(check_val, errors='coerce')):
+                break
+            
+            datetime_str = str(row.iloc[WOORI_COL_DATETIME]).split(' ')[0]
+            date = pd.to_datetime(datetime_str).strftime('%Y-%m-%d')
+            
+            description = str(row.iloc[WOORI_COL_DESC])
 
-        2. B열 (거래일시)
-           - 실제 값: {datetime_val}
-           - 데이터 타입: {type(datetime_val)}
+            # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+            # 오류 해결: 숫자로 바꾸기 전에 쉼표(,)를 제거합니다.
+            # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+            amount_str = str(row.iloc[WOORI_COL_AMOUNT])
+            amount = pd.to_numeric(amount_str.replace(',', ''), errors='coerce')
 
-        3. D열 (거래내용)
-           - 실제 값: {desc_val}
-           - 데이터 타입: {type(desc_val)}
-
-        4. E열 (금액)
-           - 실제 값: {amount_val}
-           - 데이터 타입: {type(amount_val)}
-
-        ====================== 진단 종료 ======================
-        """)
-    else:
-        st.error("파일에 데이터가 5행 이상 존재하지 않아 진단할 수 없습니다.")
-
-    # 진단 목적이므로 빈 데이터프레임을 반환하여 더 이상 진행되지 않게 함
-    return pd.DataFrame()
+            if pd.notna(amount) and amount > 0 and description.strip() != '':
+                out.append({'거래일자': date, '거래내용': description, '금액': amount})
+            else:
+                error_rows.append(excel_row_num)
+        except Exception:
+            error_rows.append(excel_row_num)
+            continue
+            
+    if error_rows:
+        st.warning(f"⚠️ **{len(error_rows)}개 행 변환 누락:** 엑셀 파일의 다음 행에서 데이터를 읽는 데 문제가 발생했습니다.\n\n- **문제가 발생한 행:** {', '.join(map(str, error_rows[:10]))}{'...' if len(error_rows) > 10 else ''}")
+            
+    return pd.DataFrame(out)
 
 # =============================================================================
 # 1. 구글 시트 연결 및 데이터 처리 함수 (이하 동일)
@@ -447,4 +443,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
