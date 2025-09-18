@@ -327,6 +327,9 @@ def render_data_page(data):
             lambda row: {v: k for k, v in account_map.items()}.get(row['계정ID'], ""), axis=1
         )
         
+        # [핵심 수정] st.data_editor가 DateColumn을 올바르게 처리하도록 데이터 타입을 datetime으로 변환
+        df_workbench['거래일자'] = pd.to_datetime(df_workbench['거래일자'])
+        
         edited_workbench = st.data_editor(df_workbench[required_display_cols],
             hide_index=True, use_container_width=True, key="workbench_editor", num_rows="dynamic",
             column_config={
@@ -387,7 +390,7 @@ def render_settings_page(data):
             column_config={"데이터구분": st.column_config.SelectboxColumn("데이터구분", options=["수익", "비용"], required=True)})
         if st.button("파일 포맷 저장"):
             if update_sheet(SHEET_NAMES["FORMATS"], edited_formats): st.success("저장되었습니다."); st.rerun()
-                
+            
 # =============================================================================
 # 5. 메인 실행 로직
 # =============================================================================
@@ -416,4 +419,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
