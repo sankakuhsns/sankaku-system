@@ -67,6 +67,12 @@ def parse_woori_bank(df_raw):
     if error_rows: st.warning(f"⚠️ **{len(error_rows)}개 행 변환 누락:** 원본 파일의 다음 행들을 확인해주세요: {', '.join(map(str, error_rows[:10]))}{'...' if len(error_rows) > 10 else ''}")
     return pd.DataFrame(out)
 
+def suggest_keywords(description):
+    text = re.sub(r'\(.+?\)|\[.+?\]', '', description).strip()
+    text = re.sub(r'[^A-Za-z0-9가-힣\s]', ' ', text).strip()
+    keywords = [word for word in text.split() if len(word) > 1 and not word.isdigit()]
+    return list(dict.fromkeys(keywords))
+
 # =============================================================================
 # 1. 구글 시트 연결 (이하 동일)
 # =============================================================================
@@ -110,7 +116,7 @@ def update_sheet(sheet_name, df):
     except Exception as e: st.error(f"'{sheet_name}' 시트 업데이트 중 오류: {e}"); return False
 
 # =============================================================================
-# 2. 로그인, 3. 핵심 로직 (이하 동일)
+# 2. 로그인, 3. 핵심 로직
 # =============================================================================
 def login_screen():
     st.title("🏢 통합 정산 관리 시스템")
@@ -140,27 +146,45 @@ def auto_categorize(df, rules_df):
     return categorized_df
 
 def calculate_pnl(transactions_df, inventory_df, accounts_df, selected_month, selected_location):
+    # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+    # 방어 로직: 데이터프레임이나 필수 컬럼이 없을 경우를 대비
+    # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+    required_cols = {'transactions': ['사업장명', '거래일자', '계정ID', '금액'], 'inventory': ['사업장명', '기준년월', '기말재고액']}
+    if transactions_df.empty or not all(col in transactions_df.columns for col in required_cols['transactions']):
+        return pd.DataFrame(), {}, pd.DataFrame()
+    
+    # 사업장 필터링
     if selected_location != "전체":
         transactions_df = transactions_df[transactions_df['사업장명'] == selected_location]
-        inventory_df = inventory_df[inventory_df['사업장명'] == selected_location]
-    if '거래일자' not in transactions_df.columns: return pd.DataFrame(), {}, pd.DataFrame()
+        if not inventory_df.empty and all(col in inventory_df.columns for col in required_cols['inventory']):
+            inventory_df = inventory_df[inventory_df['사업장명'] == selected_location]
+
+    # 월별 거래내역 필터링
     transactions_df['거래일자'] = pd.to_datetime(transactions_df['거래일자'])
     month_trans = transactions_df[transactions_df['거래일자'].dt.strftime('%Y-%m') == selected_month].copy()
     if month_trans.empty: return pd.DataFrame(), {}, pd.DataFrame()
+
     pnl_data = pd.merge(month_trans, accounts_df, on='계정ID', how='left')
     pnl_summary = pnl_data.groupby(['대분류', '소분류'])['금액'].sum().reset_index()
     sales = pnl_summary[pnl_summary['대분류'].str.contains('매출', na=False)]['금액'].sum()
     cogs_purchase = pnl_summary[pnl_summary['대분류'].str.contains('원가', na=False)]['금액'].sum()
-    prev_month = (datetime.strptime(selected_month + '-01', '%Y-%m-%d') - relativedelta(months=1)).strftime('%Y-%m')
-    begin_inv_data = inventory_df[inventory_df['기준년월'] == prev_month]
-    begin_inv = begin_inv_data['기말재고액'].sum() if not begin_inv_data.empty else 0
-    end_inv_data = inventory_df[inventory_df['기준년월'] == selected_month]
-    end_inv = end_inv_data['기말재고액'].sum() if not end_inv_data.empty else 0
+
+    # 재고액 계산 (방어 로직 포함)
+    begin_inv, end_inv = 0, 0
+    if not inventory_df.empty and all(col in inventory_df.columns for col in required_cols['inventory']):
+        prev_month = (datetime.strptime(selected_month + '-01', '%Y-%m-%d') - relativedelta(months=1)).strftime('%Y-%m')
+        begin_inv_data = inventory_df[inventory_df['기준년월'] == prev_month]
+        begin_inv = begin_inv_data['기말재고액'].sum() if not begin_inv_data.empty else 0
+        end_inv_data = inventory_df[inventory_df['기준년월'] == selected_month]
+        end_inv = end_inv_data['기말재고액'].sum() if not end_inv_data.empty else 0
+    
     cogs = begin_inv + cogs_purchase - end_inv
     gross_profit = sales - cogs
+    
     expenses = pnl_summary[~pnl_summary['대분류'].str.contains('매출|원가', na=False)]
     total_expenses = expenses['금액'].sum()
     operating_profit = gross_profit - total_expenses
+
     pnl_final = pd.DataFrame([{'항목': 'Ⅰ. 총매출', '금액': sales}, {'항목': 'Ⅱ. 매출원가', '금액': cogs}, {'항목': 'Ⅲ. 매출총이익', '금액': gross_profit}])
     expense_details = []
     for _, major_cat in expenses.groupby('대분류'):
@@ -171,6 +195,7 @@ def calculate_pnl(transactions_df, inventory_df, accounts_df, selected_month, se
     pnl_final = pd.concat([pnl_final, pd.DataFrame([{'항목': 'Ⅴ. 영업이익', '금액': operating_profit}])], ignore_index=True)
     metrics = {"총매출": sales, "매출총이익": gross_profit, "영업이익": operating_profit, "영업이익률": (operating_profit / sales) * 100 if sales > 0 else 0}
     expense_chart_data = expenses.groupby('대분류')['금액'].sum().reset_index()
+
     return pnl_final, metrics, expense_chart_data
 
 # =============================================================================
@@ -199,11 +224,11 @@ def render_pnl_page(data):
             if not expense_chart_data.empty: st.subheader("비용 구성 시각화"); st.bar_chart(expense_chart_data, x='대분류', y='금액')
 
 def render_data_page(data):
+    # (이전과 동일)
     st.header("✍️ 데이터 관리")
 
     if 'current_step' not in st.session_state: st.session_state.current_step = 'upload'
     
-    # --- 1단계: 파일 업로드 ---
     if st.session_state.current_step == 'upload':
         st.subheader("🏢 데이터 현황")
         if data["TRANSACTIONS"].empty: st.info("아직 등록된 거래내역이 없습니다. 아래에서 파일을 업로드해주세요.")
@@ -233,7 +258,6 @@ def render_data_page(data):
                 if not uploaded_file: st.error("파일을 먼저 업로드해주세요.")
                 else:
                     with st.spinner("파일을 처리하는 중입니다..."):
-                        # ... (파일 처리 로직은 이전과 동일)
                         df_raw = None
                         if uploaded_file.name.endswith('.csv'):
                             try: df_raw = pd.read_csv(uploaded_file, encoding='utf-8', header=None)
@@ -271,13 +295,11 @@ def render_data_page(data):
             if st.button("💾 월별재고 저장"):
                 if update_sheet(SHEET_NAMES["INVENTORY"], edited_inv): st.success("저장되었습니다."); st.rerun()
 
-    # --- 2단계: 분류 작업대 ---
     elif st.session_state.current_step == 'workbench':
         if 'workbench_data' not in st.session_state or st.session_state.workbench_data.empty:
             st.success("모든 내역 처리가 완료되었습니다.")
             if st.button("초기 화면으로 돌아가기", use_container_width=True):
-                st.session_state.current_step = 'upload'
-                st.rerun()
+                st.session_state.current_step = 'upload'; st.rerun()
             return
 
         df_workbench = st.session_state.workbench_data
@@ -292,7 +314,6 @@ def render_data_page(data):
             lambda row: {v: k for k, v in account_map.items()}.get(row['계정ID'], ""), axis=1
         )
         
-        # --- 작업 테이블 ---
         edited_workbench = st.data_editor(df_workbench[['거래일자', '거래내용', '금액', '계정과목_선택']],
             hide_index=True, use_container_width=True, key="workbench_editor", num_rows="dynamic",
             column_config={
@@ -307,18 +328,17 @@ def render_data_page(data):
             else:
                 edited_workbench['계정ID'] = edited_workbench['계정과목_선택'].map(account_map)
                 edited_workbench['처리상태'] = edited_workbench.apply(
-                    lambda row: '수동확인' if row['처리상태'] == '미분류' else row['처리상태'], axis=1
+                    lambda row: '수동확인' if row.get('처리상태') == '미분류' else row.get('처리상태'), axis=1
                 )
                 
-                # 원본 데이터와 병합하여 최종 저장할 데이터 생성
-                final_to_save = df_workbench.copy().drop(columns=['계정과목_선택'])
+                final_to_save = df_workbench.copy()
                 final_to_save.update(edited_workbench)
+                final_to_save = final_to_save.drop(columns=['계정과목_선택'])
                 
                 combined_trans = pd.concat([data["TRANSACTIONS"], final_to_save], ignore_index=True)
                 if update_sheet(SHEET_NAMES["TRANSACTIONS"], combined_trans):
                     st.success("작업 내용이 성공적으로 저장되었습니다.")
                     st.session_state.current_step = 'upload'
-                    # 작업대 데이터 초기화
                     if 'workbench_data' in st.session_state: del st.session_state['workbench_data']
                     st.rerun()
 
