@@ -183,7 +183,6 @@ def calculate_pnl(transactions_df, inventory_df, accounts_df, selected_month, se
 # 4. UI 렌더링 함수
 # =============================================================================
 def render_pnl_page(data):
-    # (이전과 동일)
     st.header("📅 월별 정산표")
     col1, col2 = st.columns(2)
     if not data["LOCATIONS"].empty and '사업장명' in data["LOCATIONS"].columns:
@@ -210,10 +209,8 @@ def render_pnl_page(data):
 def render_data_page(data):
     st.header("✍️ 데이터 관리")
 
-    # --- Session State 초기화 ---
-    if 'current_step' not in st.session_state:
-        st.session_state.current_step = 'upload'
-
+    if 'current_step' not in st.session_state: st.session_state.current_step = 'upload'
+    
     # --- 1단계: 파일 업로드 ---
     if st.session_state.current_step == 'upload':
         st.subheader("🏢 데이터 현황")
@@ -242,11 +239,9 @@ def render_data_page(data):
             uploaded_file = st.file_uploader("3. 해당 포맷의 파일을 업로드하세요.", type=["xlsx", "xls", "csv"])
 
             if st.button("4. 파일 처리 시작하기", type="primary", use_container_width=True):
-                if not uploaded_file:
-                    st.error("파일을 먼저 업로드해주세요.")
+                if not uploaded_file: st.error("파일을 먼저 업로드해주세요.")
                 else:
                     with st.spinner("파일을 처리하는 중입니다..."):
-                        # (파일 처리 로직은 버튼 클릭 후 실행)
                         df_raw = None
                         if uploaded_file.name.endswith('.csv'):
                             try: df_raw = pd.read_csv(uploaded_file, encoding='utf-8', header=None)
@@ -298,6 +293,8 @@ def render_data_page(data):
 
         if not df_manual.empty:
             st.subheader(f"✍️ **{len(df_manual)}**건의 미분류 내역 처리")
+            st.info("아래 목록에서 각 거래에 맞는 `계정과목`을 선택하고, 하단의 저장 버튼을 누르세요.")
+            
             accounts_df = data["ACCOUNTS"]
             account_options = [""] + [f"[{r['대분류']}/{r['소분류']}] ({r['계정ID']})" for _, r in accounts_df.iterrows()]
             account_map = {f"[{r['대분류']}/{r['소분류']}] ({r['계정ID']})": r['계정ID'] for _, r in accounts_df.iterrows()}
@@ -339,27 +336,26 @@ def render_data_page(data):
                 account_info = accounts_map.get(row['계정ID'])
                 if not account_info: continue
                 
-                st.markdown("---")
-                st.write(f"아래 거래들을 **`[{account_info['대분류']}/{account_info['소분류']}]`**(으)로 분류하셨습니다.")
-                for desc in row['거래내용']: st.caption(f"- {desc}")
+                with st.container(border=True):
+                    st.write(f"아래 거래들을 **`[{account_info['대분류']}/{account_info['소분류']}]`**(으)로 분류하셨습니다.")
+                    for desc in row['거래내용']: st.caption(f"- {desc}")
 
-                keywords = suggest_keywords(' '.join(row['거래내용']))
-                if keywords:
-                    st.write("**추천 키워드로 규칙을 추가하세요:**")
-                    rule_cols = st.columns(len(keywords))
-                    for i, keyword in enumerate(keywords):
-                        if rule_cols[i].button(keyword, key=f"kw_{row['계정ID']}_{keyword}", use_container_width=True):
-                            new_rule = {'데이터소스': '*', '키워드': keyword, '계정ID': row['계정ID']}
-                            updated_rules = pd.concat([data["RULES"], pd.DataFrame([new_rule])], ignore_index=True)
-                            if update_sheet(SHEET_NAMES["RULES"], updated_rules):
-                                st.success(f"✅ 규칙 추가 완료: '{keyword}'"); st.rerun()
+                    keywords = suggest_keywords(' '.join(row['거래내용']))
+                    if keywords:
+                        st.write("**추천 키워드로 규칙을 추가하세요:**")
+                        rule_cols = st.columns(len(keywords))
+                        for i, keyword in enumerate(keywords):
+                            if rule_cols[i].button(keyword, key=f"kw_{row['계정ID']}_{keyword}", use_container_width=True):
+                                new_rule = {'데이터소스': '*', '키워드': keyword, '계정ID': row['계정ID']}
+                                updated_rules = pd.concat([data["RULES"], pd.DataFrame([new_rule])], ignore_index=True).drop_duplicates()
+                                if update_sheet(SHEET_NAMES["RULES"], updated_rules):
+                                    st.success(f"✅ 규칙 추가 완료: '{keyword}'"); st.rerun()
         
         st.markdown("---")
         if st.button("완료하고 돌아가기", type="primary", use_container_width=True):
             for key in ['current_step', 'df_auto', 'df_manual', 'classified_manual']:
                 if key in st.session_state: del st.session_state[key]
             st.rerun()
-
 
 def render_settings_page(data):
     st.header("⚙️ 설정 관리")
