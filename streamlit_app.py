@@ -144,6 +144,12 @@ def auto_categorize(df, rules_df):
                 categorized_df.loc[index, '처리상태'] = '자동분류'; break
     return categorized_df
 
+# --- 핵심 수정: 함수를 밖으로 이동 ---
+def calc_change(current, prev):
+    if prev > 0:
+        return ((current - prev) / prev) * 100
+    return np.inf if current > 0 else 0
+
 def calculate_pnl_new(transactions_df, accounts_df, selected_month, selected_location):
     def get_monthly_data(month_str):
         month_trans = transactions_df[transactions_df['거래일자'].dt.strftime('%Y-%m') == month_str].copy()
@@ -177,11 +183,6 @@ def calculate_pnl_new(transactions_df, accounts_df, selected_month, selected_loc
     current_metrics, current_sales, current_expenses, current_details = get_monthly_data(selected_month)
     prev_metrics, _, prev_expenses, _ = get_monthly_data(prev_month_str)
     
-    def calc_change(current, prev):
-        if prev > 0:
-            return ((current - prev) / prev) * 100
-        return np.inf if current > 0 else 0
-
     current_metrics['총매출_증감'] = calc_change(current_metrics['총매출'], prev_metrics['총매출'])
     current_metrics['총비용_증감'] = calc_change(current_metrics['총비용'], prev_metrics['총비용'])
     current_metrics['영업이익_증감'] = calc_change(current_metrics['영업이익'], prev_metrics['영업이익'])
