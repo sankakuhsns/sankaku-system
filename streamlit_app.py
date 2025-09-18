@@ -6,6 +6,7 @@ from datetime import datetime
 from dateutil.relativedelta import relativedelta
 import uuid
 import re
+import numpy as np
 
 # =============================================================================
 # 0. 기본 설정 및 상수 정의
@@ -480,3 +481,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
