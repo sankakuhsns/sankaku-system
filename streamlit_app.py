@@ -157,12 +157,11 @@ def calculate_pnl(transactions_df, inventory_df, accounts_df, selected_month, se
     month_trans = transactions_df[transactions_df['거래일자'].dt.strftime('%Y-%m') == selected_month].copy()
     
     if month_trans.empty:
-        return {}, {}, pd.DataFrame()
+        return {}, {}, pd.DataFrame(), pd.DataFrame()
 
     pnl_data = pd.merge(month_trans, accounts_df, on='계정ID', how='left')
     pnl_summary = pnl_data.groupby(['대분류', '소분류'])['금액'].sum().reset_index()
-
-    # --- 계산 ---
+    
     sales = pnl_summary[pnl_summary['대분류'].str.contains('매출', na=False)]['금액'].sum()
     cogs_purchase = pnl_summary[pnl_summary['대분류'].str.contains('원가', na=False)]['금액'].sum()
     
@@ -181,14 +180,9 @@ def calculate_pnl(transactions_df, inventory_df, accounts_df, selected_month, se
     total_expenses = expenses_df['금액'].sum()
     operating_profit = gross_profit - total_expenses
 
-    # --- 결과 구조화 ---
     pnl_structure = {
         '매출': {'total': sales, 'details': pnl_summary[pnl_summary['대분류'].str.contains('매출', na=False)]},
-        '매출원가': {'total': cogs, 'details': {
-            '기초재고': begin_inv,
-            '당월매입': cogs_purchase,
-            '기말재고': end_inv
-        }},
+        '매출원가': {'total': cogs, 'details': { '기초재고': begin_inv, '당월매입': cogs_purchase, '기말재고': end_inv }},
         '비용': {'total': total_expenses, 'details': expenses_df.groupby('대분류').apply(lambda x: x.to_dict('records')).to_dict()}
     }
     
@@ -222,7 +216,6 @@ def render_pnl_page(data):
         st.warning(f"'{selected_location}'의 {selected_month} 데이터가 없습니다.")
         st.stop()
     
-    # 1. 핵심 지표
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("총매출", f"{metrics.get('총매출', 0):,.0f} 원")
     m2.metric("매출총이익", f"{metrics.get('매출총이익', 0):,.0f} 원")
@@ -230,27 +223,16 @@ def render_pnl_page(data):
     m4.metric("영업이익률", f"{metrics.get('영업이익률', 0):.1f} %")
     st.markdown("---")
 
-    # 2. 계층적 손익계산서
     st.subheader("손익 요약")
-
-    # 매출
     with st.expander(f"**Ⅰ. 총매출: {pnl_structure['매출']['total']:,.0f} 원**", expanded=True):
         st.dataframe(pnl_structure['매출']['details'][['소분류', '금액']].rename(columns={'소분류': '항목'}), use_container_width=True, hide_index=True)
 
-    # 매출원가
     with st.expander(f"**Ⅱ. 매출원가: {pnl_structure['매출원가']['total']:,.0f} 원**", expanded=True):
         cogs_details = pnl_structure['매출원가']['details']
-        st.markdown(f"""
-        <div style="padding-left: 20px;">
-            <p>기초재고: {cogs_details['기초재고']:,.0f} 원</p>
-            <p>(+) 당월매입: {cogs_details['당월매입']:,.0f} 원</p>
-            <p>(-) 기말재고: {cogs_details['기말재고']:,.0f} 원</p>
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown(f"""<div style="padding-left: 20px;"><p>기초재고: {cogs_details['기초재고']:,.0f} 원</p><p>(+) 당월매입: {cogs_details['당월매입']:,.0f} 원</p><p>(-) 기말재고: {cogs_details['기말재고']:,.0f} 원</p></div>""", unsafe_allow_html=True)
 
     st.markdown(f"#### **Ⅲ. 매출총이익: {metrics.get('매출총이익', 0):,.0f} 원**")
 
-    # 비용 (판매비와관리비)
     with st.expander(f"**Ⅳ. 총 비용 (판관비): {pnl_structure['비용']['total']:,.0f} 원**", expanded=True):
         for major_cat, minor_cats in pnl_structure['비용']['details'].items():
             major_total = sum(item['금액'] for item in minor_cats)
@@ -265,7 +247,6 @@ def render_pnl_page(data):
     st.markdown(f"--- \n ### **Ⅴ. 영업이익: {metrics.get('영업이익', 0):,.0f} 원**")
     st.markdown("---")
 
-    # 3. 시각화
     if not expense_chart_data.empty:
         st.subheader("비용 구성 시각화")
         v_col1, v_col2 = st.columns(2)
@@ -290,9 +271,7 @@ def render_data_page(data):
             trans_df_copy = data["TRANSACTIONS"].copy()
             trans_df_copy['거래일자'] = pd.to_datetime(trans_df_copy['거래일자'], errors='coerce').dt.normalize()
             summary = trans_df_copy.groupby(['사업장명', '데이터소스']).agg(
-                건수=('거래ID', 'count'), 
-                최초거래일=('거래일자', 'min'), 
-                최종거래일=('거래일자', 'max')
+                건수=('거래ID', 'count'), 최초거래일=('거래일자', 'min'), 최종거래일=('거래일자', 'max')
             ).reset_index()
             
             for location in data["LOCATIONS"]['사업장명']:
@@ -321,53 +300,45 @@ def render_data_page(data):
                 else:
                     with st.spinner("파일을 처리하는 중입니다..."):
                         df_raw = None
-                        if uploaded_file.name.endswith('.csv'):
-                            try: df_raw = pd.read_csv(uploaded_file, encoding='utf-8', header=None)
-                            except UnicodeDecodeError: uploaded_file.seek(0); df_raw = pd.read_csv(uploaded_file, encoding='cp949', header=None)
-                        else: df_raw = pd.read_excel(uploaded_file, engine='openpyxl', header=None)
-                        if df_raw is None: st.error("지원하지 않는 파일 형식입니다."); return
+                        try:
+                            if uploaded_file.name.endswith('.csv'):
+                                try: df_raw = pd.read_csv(uploaded_file, encoding='utf-8', header=None)
+                                except UnicodeDecodeError: uploaded_file.seek(0); df_raw = pd.read_csv(uploaded_file, encoding='cp949', header=None)
+                            else: df_raw = pd.read_excel(uploaded_file, header=None)
+                        except Exception as e:
+                            st.error(f"파일을 읽는 중 오류가 발생했습니다: {e}")
+                            return
 
+                        if df_raw is None: st.error("지원하지 않는 파일 형식입니다."); return
+                        
                         df_parsed = pd.DataFrame()
                         if selected_format_name == "OKPOS 매출": df_parsed = parse_okpos(df_raw)
                         elif selected_format_name == "우리은행 지출": df_parsed = parse_woori_bank(df_raw)
                         
                         if df_parsed.empty: st.warning("파일에서 처리할 데이터를 찾지 못했습니다."); return
+                        
+                        df_final = df_parsed.copy()
+                        df_final['사업장명'] = upload_location
+                        df_final['구분'] = data["FORMATS"][data["FORMATS"]['포맷명'] == selected_format_name].iloc[0]['데이터구분']
+                        df_final['데이터소스'] = selected_format_name
+                        df_final['거래ID'] = [str(uuid.uuid4()) for _ in range(len(df_final))]
 
                         if selected_format_name == "OKPOS 매출":
-                            df_final = df_parsed.copy()
-                            
-                            # --- 핵심 수정: 거래내용에 맞는 계정ID 부여 ---
                             def get_okpos_account_id(description):
                                 accounts_df = data["ACCOUNTS"]
-                                for _, row in accounts_df.iterrows():
-                                    if row['소분류'] == description:
-                                        return row['계정ID']
-                                return ''
+                                account_id = accounts_df.loc[accounts_df['소분류'] == description, '계정ID']
+                                return account_id.iloc[0] if not account_id.empty else ''
                             
                             df_final['계정ID'] = df_final['거래내용'].apply(get_okpos_account_id)
-                            # -----------------------------------------
-
-                            df_final['사업장명'] = upload_location
-                            df_final['구분'] = '수익'
-                            df_final['데이터소스'] = selected_format_name
                             df_final['처리상태'] = '자동등록'
-                            df_final['거래ID'] = [str(uuid.uuid4()) for _ in range(len(df_final))]
-                            
                             st.session_state.okpos_preview_data = df_final
                             st.session_state.current_step = 'okpos_preview'
-                            st.rerun()
                         else:
-                            df_final = df_parsed.copy()
-                            df_final['사업장명'] = upload_location
-                            df_final['구분'] = data["FORMATS"][data["FORMATS"]['포맷명'] == selected_format_name].iloc[0]['데이터구분']
-                            df_final['데이터소스'] = selected_format_name
                             df_final['처리상태'] = '미분류'
                             df_final['계정ID'] = ''
-                            df_final['거래ID'] = [str(uuid.uuid4()) for _ in range(len(df_final))]
-                            
                             st.session_state.df_processed = df_final
                             st.session_state.current_step = 'confirm'
-                            st.rerun()
+                        st.rerun()
         with tab2:
             st.subheader("월별재고 관리")
             if data["LOCATIONS"].empty:
@@ -385,7 +356,6 @@ def render_data_page(data):
         if df_preview.empty:
             st.warning("미리보기할 데이터가 없습니다. 이전 단계로 돌아가세요.")
         else:
-            # 미리보기에서 계정ID가 잘 부여되었는지 확인
             st.dataframe(df_preview[['거래일자', '거래내용', '금액', '계정ID']], use_container_width=True, hide_index=True)
 
         col1, col2 = st.columns(2)
@@ -396,7 +366,7 @@ def render_data_page(data):
         
         if col2.button("💾 최종 저장하기", type="primary"):
             if (df_preview['계정ID'] == '').any():
-                st.error("계정과목_마스터에 OKPOS 매출 항목(OKPOS 홀매출, OKPOS 포장매출, OKPOS 배달매출)이 등록되지 않았거나, 이름이 다릅니다. 확인 후 다시 시도해주세요.")
+                st.error("계정과목_마스터에 OKPOS 매출 항목(OKPOS 홀매출 등)이 등록되지 않았거나, 이름이 다릅니다.")
             else:
                 with st.spinner("데이터를 저장하는 중입니다..."):
                     combined_trans = pd.concat([data["TRANSACTIONS"], df_preview], ignore_index=True)
@@ -478,47 +448,43 @@ def render_data_page(data):
 
         st.markdown("---")
         if st.button("💾 저장하기", type="primary"):
-            edited_with_ids = edited_df.copy().reset_index(drop=True)
-            original_ids = df_original_workbench['거래ID'].reset_index(drop=True)
-            edited_with_ids['거래ID'] = original_ids
+            # 1. 원본 메타데이터와 편집된 UI 데이터 결합
+            # st.data_editor는 인덱스를 유지하므로, 이를 기준으로 안전하게 결합
+            df_original_meta = df_original_workbench.drop(columns=['거래일자', '거래내용', '금액', '계정ID'])
+            current_state_df = pd.concat([df_original_meta, edited_df.reset_index(drop=True)], axis=1)
             
-            is_complete = edited_with_ids['계정과목_선택'].notna() & (edited_with_ids['계정과목_선택'] != "")
-            
-            df_to_process = edited_with_ids[is_complete]
-            df_to_keep_ids = edited_with_ids[~is_complete]['거래ID']
+            # 2. '완성된 행' 필터링 (계정과목이 지정된 모든 행)
+            is_complete = current_state_df['계정과목_선택'].notna() & (current_state_df['계정과목_선택'] != "")
+            df_to_process = current_state_df[is_complete].copy()
+            df_to_keep = current_state_df[~is_complete].copy()
 
             if df_to_process.empty:
                 st.info("저장할 항목이 없습니다. (계정과목이 지정된 항목이 저장 대상입니다)")
             else:
-                rows_to_save = []
-                for index, processed_row in df_to_process.iterrows():
-                    original_row = df_original_workbench[df_original_workbench['거래ID'] == processed_row['거래ID']].iloc[0]
-                    final_row = original_row.copy()
-                    final_row['거래일자'] = processed_row['거래일자']
-                    final_row['거래내용'] = processed_row['거래내용']
-                    final_row['금액'] = processed_row['금액']
-                    final_row['계정ID'] = account_map[processed_row['계정과목_선택']]
-                    
-                    original_account_selection = id_to_account.get(original_row['계정ID'], "")
-                    if original_account_selection != processed_row['계정과목_선택']:
-                        final_row['처리상태'] = '수동확인'
-                    
-                    rows_to_save.append(final_row)
+                # 3. 최종 저장 데이터 생성
+                df_to_process['계정ID'] = df_to_process['계정과목_선택'].map(account_map)
                 
-                df_saved = pd.DataFrame(rows_to_save)
-
-                with st.spinner(f"{len(df_saved)}건의 항목을 저장하는 중입니다..."):
+                # 원본 계정과 비교하여 '수동확인' 상태 부여
+                original_accounts = df_original_workbench['계정ID'].map(id_to_account).fillna("")
+                edited_accounts = df_to_process['계정과목_선택']
+                is_changed = original_accounts[edited_accounts.index] != edited_accounts
+                
+                df_to_process.loc[is_changed, '처리상태'] = '수동확인'
+                
+                # 4. 시트 업데이트
+                with st.spinner(f"{len(df_to_process)}건의 항목을 저장하는 중입니다..."):
                     final_cols = data["TRANSACTIONS"].columns
-                    df_saved = df_saved.reindex(columns=final_cols).fillna('')
+                    df_saved = df_to_process.reindex(columns=final_cols).fillna('')
 
                     combined_trans = pd.concat([data["TRANSACTIONS"], df_saved], ignore_index=True)
                     if update_sheet(SHEET_NAMES["TRANSACTIONS"], combined_trans):
                         st.success(f"{len(df_saved)}건을 성공적으로 저장했습니다.")
                         
-                        if df_to_keep_ids.empty:
+                        # 5. 작업대에 남길 데이터 업데이트 (메타데이터가 포함된 원본에서 필터링)
+                        if df_to_keep.empty:
                             del st.session_state.workbench_data
                         else:
-                            st.session_state.workbench_data = df_original_workbench[df_original_workbench['거래ID'].isin(df_to_keep_ids)].reset_index(drop=True)
+                            st.session_state.workbench_data = df_original_workbench[df_original_workbench['거래ID'].isin(df_to_keep['거래ID'])].reset_index(drop=True)
                         
                         st.rerun()
 
@@ -579,5 +545,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
