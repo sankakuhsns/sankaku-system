@@ -23,19 +23,17 @@ SHEET_NAMES = {
 }
 
 # --- 파일 포맷별 파싱 상수 정의 ---
-# OKPOS (0-based index)
-OKPOS_DATA_START_ROW = 7      # 8행부터 시작
-OKPOS_COL_DATE = 0            # A열
-OKPOS_COL_DINE_IN = 34        # AI열 (홀매출)
-OKPOS_COL_TAKEOUT = 36        # AK열 (포장매출)
-OKPOS_COL_DELIVERY = 38       # AM열 (배달매출)
+OKPOS_DATA_START_ROW = 7
+OKPOS_COL_DATE = 0
+OKPOS_COL_DINE_IN = 34
+OKPOS_COL_TAKEOUT = 36
+OKPOS_COL_DELIVERY = 38
 
-# 우리은행 (0-based index)
-WOORI_DATA_START_ROW = 4      # 5행부터 시작
-WOORI_COL_CHECK = 0           # A열 (데이터 유효성 검사용)
-WOORI_COL_DATETIME = 1        # B열 (거래일시)
-WOORI_COL_DESC = 3            # D열 (거래내용)
-WOORI_COL_AMOUNT = 4          # E열 (금액)
+WOORI_DATA_START_ROW = 4
+WOORI_COL_CHECK = 0
+WOORI_COL_DATETIME = 1
+WOORI_COL_DESC = 3
+WOORI_COL_AMOUNT = 4
 
 
 # =============================================================================
@@ -46,7 +44,6 @@ def parse_okpos(df_raw):
     """OKPOS 엑셀 파일의 상세 규칙에 맞춰 데이터를 파싱하는 함수."""
     out = []
     
-    # '합계' 행을 찾아 그 전까지만 데이터로 사용
     try:
         end_row_series = df_raw[df_raw.iloc[:, OKPOS_COL_DATE].astype(str).str.contains("합계", na=False)].index
         end_row = end_row_series[0] if not end_row_series.empty else df_raw.shape[0]
@@ -58,10 +55,14 @@ def parse_okpos(df_raw):
     for i, row in df_data.iterrows():
         try:
             date_cell = row.iloc[OKPOS_COL_DATE]
-            if pd.isna(date_cell): continue
+            if pd.isna(date_cell) or any(keyword in str(date_cell) for keyword in ['소계', '합계', '월계']):
+                break
 
-            cleaned_date_str = str(date_cell).replace("소계:", "").strip()
-            date = pd.to_datetime(cleaned_date_str).strftime('%Y-%m-%d')
+            if isinstance(date_cell, (int, float)):
+                date = (pd.to_datetime('1899-12-30') + pd.to_timedelta(date_cell, 'D')).strftime('%Y-%m-%d')
+            else:
+                cleaned_date_str = str(date_cell).replace("소계:", "").strip()
+                date = pd.to_datetime(cleaned_date_str).strftime('%Y-%m-%d')
             
             홀매출 = pd.to_numeric(row.iloc[OKPOS_COL_DINE_IN], errors='coerce')
             포장매출 = pd.to_numeric(row.iloc[OKPOS_COL_TAKEOUT], errors='coerce')
@@ -85,11 +86,10 @@ def parse_woori_bank(df_raw):
 
     for i, row in df_data.iterrows():
         try:
-            # A열에 숫자가 없으면 파싱 종료
             if pd.isna(pd.to_numeric(row.iloc[WOORI_COL_CHECK], errors='coerce')):
                 break
             
-            datetime_str = str(row.iloc[WOORI_COL_DATETIME]).split(' ')[0] # 시간 부분 제거
+            datetime_str = str(row.iloc[WOORI_COL_DATETIME]).split(' ')[0]
             date = pd.to_datetime(datetime_str).strftime('%Y-%m-%d')
             description = str(row.iloc[WOORI_COL_DESC])
             amount = pd.to_numeric(row.iloc[WOORI_COL_AMOUNT], errors='coerce')
@@ -102,7 +102,7 @@ def parse_woori_bank(df_raw):
     return pd.DataFrame(out)
 
 # =============================================================================
-# 1. 구글 시트 연결 및 데이터 처리 함수 (이하 동일)
+# 1. 구글 시트 연결 및 데이터 처리 함수
 # =============================================================================
 def get_spreadsheet_key():
     try: return st.secrets["gcp_service_account"]["SPREADSHEET_KEY"]
@@ -147,7 +147,7 @@ def update_sheet(sheet_name, df):
         st.error(f"'{sheet_name}' 시트 업데이트 중 오류: {e}"); return False
 
 # =============================================================================
-# 2. 로그인, 3. 핵심 로직 (이하 동일)
+# 2. 로그인 및 인증, 3. 핵심 로직
 # =============================================================================
 def login_screen():
     st.title("🏢 통합 정산 관리 시스템")
@@ -288,31 +288,26 @@ def render_data_page(data):
 
         location_list = data["LOCATIONS"]['사업장명'].tolist()
         upload_location = st.selectbox("2. 데이터를 귀속시킬 사업장을 선택하세요.", location_list)
-        
-        # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-        # CSV 파일 업로드를 허용하도록 type에 'csv' 추가
-        # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
         uploaded_file = st.file_uploader("3. 해당 포맷의 파일을 업로드하세요.", type=["xlsx", "xls", "csv"])
 
         if uploaded_file and upload_location and selected_format_name:
             st.markdown("---"); st.subheader("4. 데이터 처리 및 저장")
             
             try:
-                # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-                # 파일 확장자에 따라 올바른 방식으로 파일 읽기 (오류 수정)
-                # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
                 df_raw = None
                 if uploaded_file.name.endswith('.csv'):
-                    # CSV 파일일 경우, 한글 인코딩(cp949)으로 읽기
-                    df_raw = pd.read_csv(uploaded_file, encoding='cp949')
+                    try:
+                        df_raw = pd.read_csv(uploaded_file, encoding='utf-8')
+                    except UnicodeDecodeError:
+                        uploaded_file.seek(0)
+                        df_raw = pd.read_csv(uploaded_file, encoding='cp949')
                 elif uploaded_file.name.endswith(('.xlsx', '.xls')):
-                    # OKPOS는 헤더가 없으므로 header=None으로 읽기
                     read_header = None if selected_format_name == "OKPOS 매출" else 0
                     df_raw = pd.read_excel(uploaded_file, header=read_header)
                 
                 if df_raw is None:
                     st.error("지원하지 않는 파일 형식입니다."); st.stop()
-
+                
                 st.write("✅ 원본 파일 미리보기"); st.dataframe(df_raw.head(10))
                 
                 df_parsed = pd.DataFrame()
@@ -324,7 +319,6 @@ def render_data_page(data):
                 if df_parsed.empty:
                     st.warning("파일에서 처리할 데이터를 찾지 못했습니다. 파일 내용이나 파싱 규칙을 확인해주세요."); st.stop()
 
-                # (이하 로직은 이전과 동일)
                 df_final = df_parsed.copy()
                 df_final.loc[:, '사업장명'] = upload_location
                 df_final.loc[:, '구분'] = selected_format['데이터구분']
@@ -337,14 +331,17 @@ def render_data_page(data):
                 
                 if selected_format['데이터구분'] == '비용':
                     existing_trans = data["TRANSACTIONS"]
-                    existing_trans['unique_key'] = existing_trans['사업장명'] + existing_trans['거래일자'].astype(str) + existing_trans['거래내용'] + existing_trans['금액'].astype(str)
-                    df_final['unique_key'] = df_final['사업장명'] + df_final['거래일자'].astype(str) + df_final['거래내용'] + df_final['금액'].astype(str)
-                    duplicates = df_final[df_final['unique_key'].isin(existing_trans['unique_key'])]
-                    new_transactions = df_final[~df_final['unique_key'].isin(existing_trans['unique_key'])].drop(columns=['unique_key'])
-                    if not duplicates.empty:
-                        with st.expander(f"⚠️ {len(duplicates)}건의 중복 의심 거래가 제외되었습니다. (펼쳐서 확인)"):
-                            st.dataframe(duplicates[['거래일자', '거래내용', '금액']])
-                    df_to_process = new_transactions
+                    if not existing_trans.empty:
+                        existing_trans['unique_key'] = existing_trans['사업장명'] + existing_trans['거래일자'].astype(str) + existing_trans['거래내용'] + existing_trans['금액'].astype(str)
+                        df_final['unique_key'] = df_final['사업장명'] + df_final['거래일자'].astype(str) + df_final['거래내용'] + df_final['금액'].astype(str)
+                        duplicates = df_final[df_final['unique_key'].isin(existing_trans['unique_key'])]
+                        new_transactions = df_final[~df_final['unique_key'].isin(existing_trans['unique_key'])].drop(columns=['unique_key'])
+                        if not duplicates.empty:
+                            with st.expander(f"⚠️ {len(duplicates)}건의 중복 의심 거래가 제외되었습니다. (펼쳐서 확인)"):
+                                st.dataframe(duplicates[['거래일자', '거래내용', '금액']])
+                        df_to_process = new_transactions
+                    else:
+                        df_to_process = df_final.drop(columns=['unique_key'], errors='ignore')
                 else:
                     df_to_process = df_final
                 
@@ -374,7 +371,6 @@ def render_data_page(data):
                         combined = pd.concat([data["TRANSACTIONS"], final_to_save], ignore_index=True)
                         if update_sheet(SHEET_NAMES["TRANSACTIONS"], combined):
                             st.success("저장되었습니다."); st.rerun()
-
             except Exception as e:
                 st.error(f"파일 처리 중 오류: {e}")
 
@@ -385,7 +381,7 @@ def render_data_page(data):
         if st.button("💾 월별재고 저장"):
             if update_sheet(SHEET_NAMES["INVENTORY"], edited_inv):
                 st.success("저장되었습니다."); st.rerun()
-                
+
 def render_settings_page(data):
     st.header("⚙️ 설정 관리")
     tab1, tab2, tab3, tab4 = st.tabs(["🏢 사업장 관리", "📚 계정과목 관리", "🤖 자동분류 규칙", "📄 파일 포맷 관리"])
@@ -435,5 +431,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
