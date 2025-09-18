@@ -22,18 +22,18 @@ SHEET_NAMES = {
 }
 
 # --- OKPOS 파싱 상수 (0-based index) ---
-OKPOS_DATA_START_ROW = 7      # 8행
-OKPOS_COL_DATE = 0            # A열
-OKPOS_COL_DINE_IN = 34        # AI열
-OKPOS_COL_TAKEOUT = 36        # AK열
-OKPOS_COL_DELIVERY = 38       # AM열
+OKPOS_DATA_START_ROW = 7
+OKPOS_COL_DATE = 0
+OKPOS_COL_DINE_IN = 34
+OKPOS_COL_TAKEOUT = 36
+OKPOS_COL_DELIVERY = 38
 
 # --- 우리은행 파싱 상수 (0-based index) ---
-WOORI_DATA_START_ROW = 4      # 5행
-WOORI_COL_CHECK = 0           # A열
-WOORI_COL_DATETIME = 1        # B열
-WOORI_COL_DESC = 3            # D열
-WOORI_COL_AMOUNT = 4          # E열
+WOORI_DATA_START_ROW = 4
+WOORI_COL_CHECK = 0
+WOORI_COL_DATETIME = 1
+WOORI_COL_DESC = 3
+WOORI_COL_AMOUNT = 4
 
 # =============================================================================
 # ★★★ 전용 파서 함수들 ★★★
@@ -252,6 +252,7 @@ def render_pnl_page(data):
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("총매출", f"{metrics['총매출']:,.0f} 원"); m2.metric("매출총이익", f"{metrics['매출총이익']:,.0f} 원")
             m3.metric("영업이익", f"{metrics['영업이익']:,.0f} 원"); m4.metric("영업이익률", f"{metrics['영업이익률']:.1f} %")
+            
             st.dataframe(pnl_df.style.format({'금액': '{:,.0f}'}), use_container_width=True, hide_index=True)
 
             if not expense_chart_data.empty:
@@ -261,21 +262,17 @@ def render_pnl_page(data):
 def render_data_page(data):
     st.header("✍️ 데이터 관리")
 
-    # --- 1. 데이터 현황 대시보드 ---
     st.subheader("🏢 데이터 현황")
     if data["TRANSACTIONS"].empty:
         st.info("아직 등록된 거래내역이 없습니다. 아래에서 파일을 업로드해주세요.")
     else:
         summary = data["TRANSACTIONS"].groupby(['사업장명', '데이터소스']).agg(
-            건수=('거래ID', 'count'),
-            최초거래일=('거래일자', 'min'),
-            최종거래일=('거래일자', 'max')
+            건수=('거래ID', 'count'), 최초거래일=('거래일자', 'min'), 최종거래일=('거래일자', 'max')
         ).reset_index()
         for location in data["LOCATIONS"]['사업장명']:
             st.markdown(f"**{location}**")
             loc_summary = summary[summary['사업장명'] == location]
-            if loc_summary.empty:
-                st.write("└ 데이터 없음")
+            if loc_summary.empty: st.write("└ 데이터 없음")
             else:
                 for _, row in loc_summary.iterrows():
                     st.write(f"└ `{row['데이터소스']}`: {row['최초거래일']} ~ {row['최종거래일']} (총 {row['건수']}건)")
@@ -340,8 +337,11 @@ def render_data_page(data):
                 st.markdown("---")
                 if not df_auto.empty:
                     with st.expander(f"✅ **{len(df_auto)}**건이 자동으로 분류되었습니다. (펼쳐서 확인)"):
-                        df_auto_display = pd.merge(df_auto, data["ACCOUNTS"], on="계정ID")
-                        st.dataframe(df_auto_display[['거래일자', '거래내용', '금액', '소분류']])
+                        # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+                        # 개선: 대분류, 소분류를 함께 보여주도록 수정
+                        # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+                        df_auto_display = pd.merge(df_auto, data["ACCOUNTS"], on="계정ID", how="left")
+                        st.dataframe(df_auto_display[['거래일자', '거래내용', '금액', '대분류', '소분류']], hide_index=True)
                 
                 if not df_manual.empty:
                     st.subheader(f"✍️ **{len(df_manual)}**건의 미분류 내역 처리")
@@ -350,12 +350,17 @@ def render_data_page(data):
                     account_options = [""] + [f"[{r['대분류']}/{r['소분류']}] ({r['계정ID']})" for _, r in accounts_df.iterrows()]
                     account_map = {f"[{r['대분류']}/{r['소분류']}] ({r['계정ID']})": r['계정ID'] for _, r in accounts_df.iterrows()}
 
-                    df_manual['규칙추가'] = False
-                    df_manual['계정과목_선택'] = ""
+                    df_manual['규칙추가'] = False; df_manual['계정과목_선택'] = ""
                     
                     edited_manual = st.data_editor(df_manual[['규칙추가', '거래일자', '거래내용', '계정과목_선택']], hide_index=True, use_container_width=True,
                         column_config={"규칙추가": st.column_config.CheckboxColumn("규칙추가"),
                                        "계정과목_선택": st.column_config.SelectboxColumn("계정과목 선택", options=account_options, required=True)})
+
+                    if 'new_rules_inputs' not in st.session_state: st.session_state.new_rules_inputs = {}
+
+                    # 규칙 추가 UI 동적 생성
+                    for _, row in edited_manual[edited_manual['규칙추가']].iterrows():
+                        st.text_input(f"'{row['거래내용'][:30]}...'에 대한 규칙 키워드", key=f"rule_{row['거래ID']}")
 
                     if st.button("💾 위 내역 `통합거래_원장`에 최종 저장하기", type="primary"):
                         if "" in edited_manual['계정과목_선택'].tolist():
@@ -364,16 +369,19 @@ def render_data_page(data):
                             edited_manual['계정ID'] = edited_manual['계정과목_선택'].map(account_map)
                             edited_manual['처리상태'] = '수동확인'
                             
-                            # 규칙 추가 로직
-                            new_rules = []
+                            new_rules_data = []
                             for _, row in edited_manual[edited_manual['규칙추가']].iterrows():
-                                keyword = st.text_input(f"'{row['거래내용']}'에 대한 규칙 키워드를 입력하세요.", key=f"rule_{row['거래ID']}")
-                                if keyword: new_rules.append({'데이터소스': '*', '키워드': keyword, '계정ID': row['계정ID']})
+                                keyword = st.session_state[f"rule_{row['거래ID']}"]
+                                if keyword: new_rules_data.append({'데이터소스': '*', '키워드': keyword, '계정ID': row['계정ID']})
                             
-                            if new_rules:
-                                combined_rules = pd.concat([data["RULES"], pd.DataFrame(new_rules)], ignore_index=True)
+                            if new_rules_data:
+                                combined_rules = pd.concat([data["RULES"], pd.DataFrame(new_rules_data)], ignore_index=True)
                                 update_sheet(SHEET_NAMES["RULES"], combined_rules)
-                                st.success(f"{len(new_rules)}개의 새 자동분류 규칙이 저장되었습니다.")
+                                st.success(f"{len(new_rules_data)}개의 새 자동분류 규칙이 저장되었습니다.")
+                                # Clean up session state
+                                for key in list(st.session_state.keys()):
+                                    if key.startswith('rule_'): del st.session_state[key]
+
 
                             final_to_save = pd.merge(df_manual.drop(columns=['규칙추가', '계정과목_선택']), edited_manual[['거래ID', '계정ID', '처리상태']], on='거래ID')
                             combined_trans = pd.concat([data["TRANSACTIONS"], df_auto, final_to_save], ignore_index=True)
