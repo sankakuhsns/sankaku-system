@@ -143,9 +143,9 @@ def auto_categorize(df, rules_df):
                 categorized_df.loc[index, '처리상태'] = '자동분류'; break
     return categorized_df
 
-# --- 재설계된 정산표 계산 함수 ---
+# --- 재설계된 정산표 계산 함수 (대분류 직접 사용) ---
 def calculate_pnl_new(transactions_df, accounts_df, selected_month, selected_location):
-    if transactions_df.empty or '통합분류' not in accounts_df.columns:
+    if transactions_df.empty:
         return {}, pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     if selected_location != "전체":
@@ -158,7 +158,8 @@ def calculate_pnl_new(transactions_df, accounts_df, selected_month, selected_loc
         return {}, pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     pnl_data = pd.merge(month_trans, accounts_df, on='계정ID', how='left')
-    pnl_data['통합분류'] = pnl_data['통합분류'].fillna('기타')
+    # 대분류가 비어있는 경우 '기타'로 처리
+    pnl_data['대분류'] = pnl_data['대분류'].fillna('기타')
 
     # --- 계산 ---
     sales_df = pnl_data[pnl_data['대분류'].str.contains('매출', na=False)]
@@ -178,22 +179,17 @@ def calculate_pnl_new(transactions_df, accounts_df, selected_month, selected_loc
     }
     
     sales_breakdown = sales_df.groupby('소분류')['금액'].sum().reset_index()
-    expense_breakdown = expenses_df.groupby('통합분류')['금액'].sum().reset_index()
+    # expense_breakdown을 '대분류' 기준으로 집계하도록 수정
+    expense_breakdown = expenses_df.groupby('대분류')['금액'].sum().reset_index()
     
     return metrics, sales_breakdown, expense_breakdown, pnl_data
 
 # =============================================================================
 # 4. UI 렌더링 함수
 # =============================================================================
-# --- 재설계된 월별 정산표 UI ---
+# --- 재설계된 월별 정산표 UI (대분류 직접 사용) ---
 def render_pnl_page(data):
     st.header("📅 월별 정산표")
-    
-    # 계정과목 마스터에 '통합분류' 열이 있는지 확인
-    if '통합분류' not in data["ACCOUNTS"].columns:
-        st.error("오류: `계정과목_마스터` 시트에 '통합분류' 열이 없습니다. 필수 작업을 먼저 완료해주세요.")
-        st.info("`계정과목_마스터` 시트에 '통합분류' 열을 추가하고, 각 계정과목에 맞는 표준 항목(인건비, 식자재, 소모품, 광고비, 고정비, 기타)을 입력해야 합니다.")
-        st.stop()
 
     col1, col2 = st.columns(2)
     location_list = ["전체"] + data["LOCATIONS"]['사업장명'].tolist() if not data["LOCATIONS"].empty else ["전체"]
@@ -210,39 +206,36 @@ def render_pnl_page(data):
     if not metrics:
         st.warning(f"'{selected_location}'의 {selected_month} 데이터가 없습니다.")
         st.stop()
-
-    # --- 대시보드 레이아웃 ---
+    
     summary_col, chart_col = st.columns([0.6, 0.4])
 
     with summary_col:
         st.subheader("📊 손익 요약")
-        # 1. 핵심 지표
         m1, m2, m3 = st.columns(3)
         m1.metric("총매출", f"{metrics.get('총매출', 0):,.0f} 원")
         m2.metric("총비용", f"{metrics.get('총비용', 0):,.0f} 원")
         m3.metric("영업이익", f"{metrics.get('영업이익', 0):,.0f} 원", f"{metrics.get('영업이익률', 0):.1f} %")
         st.markdown("---")
 
-        # 2. 계층적 손익계산서
         with st.expander(f"**Ⅰ. 총매출: {metrics.get('총매출', 0):,.0f} 원**", expanded=True):
             st.dataframe(sales_breakdown.rename(columns={'소분류': '항목', '금액': '금액(원)'}), use_container_width=True, hide_index=True)
 
         with st.expander(f"**Ⅱ. 총비용: {metrics.get('총비용', 0):,.0f} 원**", expanded=True):
+            # expense_breakdown의 컬럼명을 '대분류'로 수정
             for _, row in expense_breakdown.iterrows():
-                category = row['통합분류']
+                category = row['대분류']
                 amount = row['금액']
                 sub_col1, sub_col2 = st.columns([0.8, 0.2])
                 sub_col1.markdown(f"- {category}: **{amount:,.0f} 원**")
                 if sub_col2.button("상세 내역", key=f"btn_{category}"):
-                    detail_df = pnl_details_df[pnl_details_df['통합분류'] == category]
-                    # 요청된 컬럼 순서: 거래일자, 사업장명, 거래내용, 금액
+                    # pnl_details_df도 '대분류'로 필터링
+                    detail_df = pnl_details_df[pnl_details_df['대분류'] == category]
                     st.dataframe(detail_df[['거래일자', '사업장명', '거래내용', '금액']].sort_values('거래일자'), use_container_width=True, hide_index=True)
         
         st.markdown(f"--- \n ### **Ⅲ. 영업이익: {metrics.get('영업이익', 0):,.0f} 원**")
 
     with chart_col:
         st.subheader("📈 매출 및 비용 분석")
-        # 3. 시각화
         if not sales_breakdown.empty:
             st.markdown("**매출 비중**")
             fig_pie_sales = px.pie(sales_breakdown, names='소분류', values='금액', hole=.4,
@@ -252,7 +245,8 @@ def render_pnl_page(data):
         
         if not expense_breakdown.empty:
             st.markdown("**비용 비중**")
-            fig_pie_expenses = px.pie(expense_breakdown, names='통합분류', values='금액', hole=.4,
+            # expense_breakdown의 컬럼명을 '대분류'로 수정
+            fig_pie_expenses = px.pie(expense_breakdown, names='대분류', values='금액', hole=.4,
                                       title=f"총 비용: {metrics.get('총비용', 0):,.0f} 원")
             fig_pie_expenses.update_traces(textinfo='percent+label', textfont_size=14)
             st.plotly_chart(fig_pie_expenses, use_container_width=True)
@@ -446,12 +440,11 @@ def render_data_page(data):
 
         st.markdown("---")
         if st.button("💾 저장하기", type="primary"):
-            # 1. 원본 메타데이터와 편집된 UI 데이터 결합
-            df_original_meta = df_original_workbench.drop(columns=['거래일자', '거래내용', '금액', '계정ID'])
-            # reset_index를 통해 인덱스를 정렬하여 concat 오류 방지
-            current_state_df = pd.concat([df_original_meta.reset_index(drop=True), edited_df.reset_index(drop=True)], axis=1)
+            current_state_df = pd.concat([
+                df_original_workbench.drop(columns=['거래일자', '거래내용', '금액', '계정ID']).reset_index(drop=True),
+                edited_df.reset_index(drop=True)
+            ], axis=1)
             
-            # 2. '완성된 행' 필터링 (계정과목이 지정된 모든 행)
             is_complete = current_state_df['계정과목_선택'].notna() & (current_state_df['계정과목_선택'] != "")
             df_to_process = current_state_df[is_complete].copy()
             df_to_keep = current_state_df[~is_complete].copy()
@@ -459,18 +452,14 @@ def render_data_page(data):
             if df_to_process.empty:
                 st.info("저장할 항목이 없습니다. (계정과목이 지정된 항목이 저장 대상입니다)")
             else:
-                # 3. 최종 저장 데이터 생성
                 df_to_process['계정ID'] = df_to_process['계정과목_선택'].map(account_map)
                 
-                # 원본 계정과 비교하여 '수동확인' 상태 부여
                 original_accounts = df_original_workbench['계정ID'].map(id_to_account).fillna("")
                 edited_accounts = df_to_process['계정과목_선택']
-                # 인덱스가 맞지 않을 수 있으므로, .reindex 사용
                 is_changed = original_accounts.reindex(edited_accounts.index) != edited_accounts
                 
                 df_to_process.loc[is_changed, '처리상태'] = '수동확인'
                 
-                # 4. 시트 업데이트
                 with st.spinner(f"{len(df_to_process)}건의 항목을 저장하는 중입니다..."):
                     final_cols = data["TRANSACTIONS"].columns
                     df_saved = df_to_process.reindex(columns=final_cols).fillna('')
@@ -479,9 +468,9 @@ def render_data_page(data):
                     if update_sheet(SHEET_NAMES["TRANSACTIONS"], combined_trans):
                         st.success(f"{len(df_saved)}건을 성공적으로 저장했습니다.")
                         
-                        # 5. 작업대에 남길 데이터 업데이트
                         if df_to_keep.empty:
-                            del st.session_state.workbench_data
+                            if 'workbench_data' in st.session_state:
+                                del st.session_state.workbench_data
                         else:
                             st.session_state.workbench_data = df_original_workbench[df_original_workbench['거래ID'].isin(df_to_keep['거래ID'])].reset_index(drop=True)
                         
