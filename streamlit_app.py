@@ -328,7 +328,6 @@ def render_data_page(data):
         st.subheader(f"✍️ 분류 작업대 (남은 내역: {len(st.session_state.workbench_data)}건)")
         st.info("변경을 원하는 행의 계정과목을 지정하고 저장하세요. 일부만 처리할 수 있습니다.")
         
-        # --- 데이터 준비 ---
         accounts_df = data["ACCOUNTS"]
         account_options = [""] + [f"[{r['대분류']}/{r['소분류']}] ({r['계정ID']})" for _, r in accounts_df.iterrows()]
         account_map = {f"[{r['대분류']}/{r['소분류']}] ({r['계정ID']})": r['계정ID'] for _, r in accounts_df.iterrows()}
@@ -336,14 +335,12 @@ def render_data_page(data):
 
         df_original_workbench = st.session_state.workbench_data.copy()
         
-        # 원본 데이터에서 UI 표시용 데이터프레임 생성
         df_display = pd.DataFrame()
         df_display['거래일자'] = pd.to_datetime(df_original_workbench['거래일자']).dt.normalize()
         df_display['거래내용'] = df_original_workbench['거래내용']
         df_display['금액'] = df_original_workbench['금액']
         df_display['계정과목_선택'] = df_original_workbench['계정ID'].map(id_to_account).fillna("")
         
-        # --- Data Editor UI ---
         edited_df = st.data_editor(
             df_display,
             hide_index=True, use_container_width=True, key="workbench_editor", num_rows="dynamic",
@@ -357,68 +354,61 @@ def render_data_page(data):
 
         st.markdown("---")
         if st.button("💾 변경된 내용 저장하기", type="primary", use_container_width=True):
-            # --- 부분 저장 로직 (재설계) ---
+            # --- 부분 저장 로직 (단순화 및 안정화 버전) ---
             
-            # 1. 원본 데이터에 거래ID를 인덱스로 설정하여 비교 기준 마련
-            original_with_index = df_original_workbench.set_index('거래ID')
+            # 1. 편집 후 데이터에 원본 ID 다시 붙이기
+            # st.data_editor는 인덱스를 유지하므로, 이를 기준으로 ID를 안전하게 매칭
+            edited_df_with_ids = edited_df.copy()
+            edited_df_with_ids['거래ID'] = df_original_workbench['거래ID']
             
-            # 2. 편집된 데이터에 원본 거래ID를 다시 붙여주기 (삭제된 행은 여기서 제외됨)
-            edited_with_ids = edited_df.copy()
-            # 편집기에서 행이 삭제되지 않았을 경우에만 ID를 붙여줌
-            if len(edited_with_ids) >= len(original_with_index):
-                edited_with_ids['거래ID'] = original_with_index.index.tolist() + [None] * (len(edited_with_ids) - len(original_with_index))
-            else: # 행이 삭제된 경우, 인덱스를 기준으로 매칭 (한계점 존재)
-                st.warning("행 삭제 기능은 현재 지원되지 않습니다. 삭제를 원하시면 내용을 비워주세요.")
-                edited_with_ids['거래ID'] = original_with_index.index.tolist()[:len(edited_with_ids)]
-            
-            edited_with_index = edited_with_ids.set_index('거래ID')
+            # 2. 완성된 행과 미완성 행 분리
+            is_complete = (
+                edited_df_with_ids['계정과목_선택'].notna() & (edited_df_with_ids['계정과목_선택'] != "") &
+                edited_df_with_ids['거래일자'].notna() &
+                edited_df_with_ids['금액'].notna()
+            )
+            df_complete = edited_df_with_ids[is_complete]
+            df_incomplete_ids = edited_df_with_ids[~is_complete]['거래ID']
 
-            # 3. 저장할 행과 남길 행 결정
-            rows_to_save = []
-            rows_to_keep_ids = []
-            
-            for trans_id, original_row in original_with_index.iterrows():
-                if trans_id not in edited_with_index.index: # 행이 삭제된 경우 (논리적으로는 무시)
-                    continue
+            # 3. 원본과 비교하여 실제로 변경된 항목만 저장 대상으로 선정
+            df_to_save_final = []
+            if not df_complete.empty:
+                for index, edited_row in df_complete.iterrows():
+                    original_row = df_original_workbench[df_original_workbench['거래ID'] == edited_row['거래ID']].iloc[0]
+                    original_display_account = id_to_account.get(original_row['계정ID'], "")
 
-                edited_row = edited_with_index.loc[trans_id]
-                original_display_account = id_to_account.get(original_row['계정ID'], "")
+                    # 하나라도 다르면 변경된 것으로 간주
+                    if not (original_row['거래내용'] == edited_row['거래내용'] and \
+                            np.isclose(original_row['금액'], edited_row['금액']) and \
+                            original_display_account == edited_row['계정과목_선택']):
+                        
+                        row_to_save = original_row.copy()
+                        row_to_save['거래일자'] = edited_row['거래일자']
+                        row_to_save['거래내용'] = edited_row['거래내용']
+                        row_to_save['금액'] = edited_row['금액']
+                        row_to_save['계정ID'] = account_map[edited_row['계정과목_선택']]
+                        row_to_save['처리상태'] = '수동확인'
+                        df_to_save_final.append(row_to_save)
 
-                # 원본과 수정본 비교
-                is_changed = not (pd.to_datetime(original_row['거래일자']).normalize() == edited_row['거래일자'] and \
-                                  original_row['거래내용'] == edited_row['거래내용'] and \
-                                  np.isclose(original_row['금액'], edited_row['금액']) and \
-                                  original_display_account == edited_row['계정과목_선택'])
-
-                is_complete = edited_row['계정과목_선택'] != "" and pd.notna(edited_row['거래일자']) and pd.notna(edited_row['금액'])
-
-                if is_changed and is_complete:
-                    row_to_save = original_row.copy()
-                    row_to_save['거래일자'] = edited_row['거래일자']
-                    row_to_save['거래내용'] = edited_row['거래내용']
-                    row_to_save['금액'] = edited_row['금액']
-                    row_to_save['계정ID'] = account_map[edited_row['계정과목_선택']]
-                    row_to_save['처리상태'] = '수동확인'
-                    rows_to_save.append(row_to_save)
-                else:
-                    rows_to_keep_ids.append(trans_id)
-
-            # 새롭게 추가된 행 처리 (현재 로직에서는 지원하지 않음)
-            
-            if not rows_to_save:
+            # 4. 최종 처리
+            if not df_to_save_final:
                 st.info("저장할 만큼 충분히 수정된 항목이 없습니다.")
             else:
-                df_to_save = pd.DataFrame(rows_to_save)
+                df_saved = pd.DataFrame(df_to_save_final)
                 
-                with st.spinner(f"{len(df_to_save)}건의 항목을 저장하는 중입니다..."):
-                    combined_trans = pd.concat([data["TRANSACTIONS"], df_to_save], ignore_index=True)
+                with st.spinner(f"{len(df_saved)}건의 항목을 저장하는 중입니다..."):
+                    combined_trans = pd.concat([data["TRANSACTIONS"], df_saved], ignore_index=True)
                     if update_sheet(SHEET_NAMES["TRANSACTIONS"], combined_trans):
-                        st.success(f"{len(df_to_save)}건을 성공적으로 저장했습니다.")
+                        st.success(f"{len(df_saved)}건을 성공적으로 저장했습니다.")
                         
-                        if rows_to_keep_ids:
-                            st.session_state.workbench_data = df_original_workbench[df_original_workbench['거래ID'].isin(rows_to_keep_ids)].reset_index(drop=True)
-                        else:
+                        # 작업대에는 저장되지 않은 항목들만 남김
+                        saved_ids = df_saved['거래ID']
+                        remaining_df = df_original_workbench[~df_original_workbench['거래ID'].isin(saved_ids)]
+                        
+                        if remaining_df.empty:
                             del st.session_state.workbench_data
+                        else:
+                            st.session_state.workbench_data = remaining_df.reset_index(drop=True)
                         
                         st.rerun()
 
