@@ -207,7 +207,6 @@ def render_data_page(data):
 
     if 'current_step' not in st.session_state: st.session_state.current_step = 'upload'
     
-    # --- 1단계: 파일 업로드 ---
     if st.session_state.current_step == 'upload':
         st.subheader("🏢 데이터 현황")
         if data["TRANSACTIONS"].empty: st.info("아직 등록된 거래내역이 없습니다. 아래에서 파일을 업로드해주세요.")
@@ -305,8 +304,7 @@ def render_data_page(data):
         if 'workbench_data' not in st.session_state or st.session_state.workbench_data.empty:
             st.success("모든 내역 처리가 완료되었습니다.")
             if st.button("초기 화면으로 돌아가기", use_container_width=True):
-                st.session_state.current_step = 'upload'
-                st.rerun()
+                st.session_state.current_step = 'upload'; st.rerun()
             return
 
         df_workbench = st.session_state.workbench_data
@@ -317,25 +315,25 @@ def render_data_page(data):
         account_options = [""] + [f"[{r['대분류']}/{r['소분류']}] ({r['계정ID']})" for _, r in accounts_df.iterrows()]
         account_map = {f"[{r['대분류']}/{r['소분류']}] ({r['계정ID']})": r['계정ID'] for _, r in accounts_df.iterrows()}
         
+        # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+        # 오류 수정: data_editor에 전달하기 전, 필요한 모든 컬럼이 있는지 확인하고 생성
+        # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+        required_display_cols = ['거래일자', '거래내용', '금액', '계정과목_선택']
+        for col in required_display_cols:
+            if col not in df_workbench.columns:
+                df_workbench[col] = ""
+        
         df_workbench['계정과목_선택'] = df_workbench.apply(
             lambda row: {v: k for k, v in account_map.items()}.get(row['계정ID'], ""), axis=1
         )
         
-        # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-        # 오류 수정: 필수 컬럼이 항상 존재하도록 보장
-        # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-        display_cols = ['거래일자', '거래내용', '금액', '계정과목_선택']
-        for col in display_cols:
-            if col not in df_workbench.columns:
-                df_workbench[col] = "" if col != "금액" else 0
-
-        edited_workbench = st.data_editor(df_workbench[display_cols],
+        edited_workbench = st.data_editor(df_workbench[required_display_cols],
             hide_index=True, use_container_width=True, key="workbench_editor", num_rows="dynamic",
             column_config={
                 "거래일자": st.column_config.DateColumn("거래일자", format="YYYY-MM-DD", required=True),
                 "거래내용": st.column_config.TextColumn("거래내용", required=True),
                 "금액": st.column_config.NumberColumn("금액", required=True),
-                "계정과목_선택": st.column_config.SelectboxColumn("계정과목 선택", options=account_options, required=True)
+                "계정과목_선택": st.column_config.SelectboxColumn("계정과목 선택", options=account_options)
             })
 
         st.markdown("---")
@@ -343,24 +341,21 @@ def render_data_page(data):
             if "" in edited_workbench['계정과목_선택'].tolist():
                 st.error("모든 항목의 `계정과목`을 선택해야 저장이 가능합니다.")
             else:
-                final_df = edited_workbench.copy()
-                final_df['계정ID'] = final_df['계정과목_선택'].map(account_map)
+                # data_editor의 변경사항을 원본 데이터프레임에 안전하게 병합
+                edited_ids = [st.session_state.workbench_data.iloc[i]['거래ID'] for i, r in enumerate(edited_workbench.to_dict('records'))]
+                edited_df_with_ids = edited_workbench.copy()
+                edited_df_with_ids['거래ID'] = edited_ids
 
-                # 원본 데이터프레임에서 필요한 정보(거래ID 등)를 가져와서 합치기
-                final_to_save = df_workbench.copy().drop(columns=['계정과목_선택'])
-                # 사용자가 편집한 내용(날짜, 내용, 금액)으로 업데이트
-                final_to_save.update(final_df)
-                # 분류 결과 업데이트
-                final_to_save['계정ID'] = final_df['계정ID']
+                final_to_save = st.session_state.workbench_data.copy()
+                final_to_save = final_to_save.set_index('거래ID')
+                edited_df_with_ids = edited_df_with_ids.set_index('거래ID')
+                final_to_save.update(edited_df_with_ids)
+                final_to_save = final_to_save.reset_index()
+
+                final_to_save['계정ID'] = final_to_save['계정과목_선택'].map(account_map)
                 final_to_save['처리상태'] = '수동확인'
-
-                # 새로 추가된 행에 대한 처리
-                new_rows_mask = final_to_save['거래ID'].isnull()
-                for i in final_to_save[new_rows_mask].index:
-                    final_to_save.loc[i, '거래ID'] = str(uuid.uuid4())
-                    final_to_save.loc[i, '사업장명'] = st.session_state.workbench_data['사업장명'].iloc[0]
-                    final_to_save.loc[i, '구분'] = st.session_state.workbench_data['구분'].iloc[0]
-                    final_to_save.loc[i, '데이터소스'] = '수기입력'
+                
+                final_to_save = final_to_save.drop(columns=['계정과목_선택'])
                 
                 combined_trans = pd.concat([data["TRANSACTIONS"], final_to_save], ignore_index=True)
                 if update_sheet(SHEET_NAMES["TRANSACTIONS"], combined_trans):
