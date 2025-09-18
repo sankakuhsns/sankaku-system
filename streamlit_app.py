@@ -8,6 +8,7 @@ import uuid
 import re
 import numpy as np
 import plotly.express as px
+from io import BytesIO
 
 # =============================================================================
 # 0. 기본 설정 및 상수 정의
@@ -143,111 +144,144 @@ def auto_categorize(df, rules_df):
                 categorized_df.loc[index, '처리상태'] = '자동분류'; break
     return categorized_df
 
-# --- 재설계된 정산표 계산 함수 (대분류 직접 사용) ---
+# --- 재설계된 정산표 계산 함수 (대분류 직접 사용 + 전월 대비) ---
 def calculate_pnl_new(transactions_df, accounts_df, selected_month, selected_location):
-    if transactions_df.empty:
-        return {}, pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    def get_monthly_data(month_str):
+        month_trans = transactions_df[transactions_df['거래일자'].dt.strftime('%Y-%m') == month_str].copy()
+        if month_trans.empty:
+            return {'총매출': 0, '총비용': 0, '영업이익': 0}, pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+        pnl_data = pd.merge(month_trans, accounts_df, on='계정ID', how='left')
+        pnl_data['대분류'] = pnl_data['대분류'].fillna('기타')
+        
+        sales_df = pnl_data[pnl_data['대분류'].str.contains('매출', na=False)]
+        total_sales = sales_df['금액'].sum()
+        
+        expenses_df = pnl_data[~pnl_data['대분류'].str.contains('매출', na=False)]
+        total_expenses = expenses_df['금액'].sum()
+        
+        operating_profit = total_sales - total_expenses
+        
+        metrics = {"총매출": total_sales, "총비용": total_expenses, "영업이익": operating_profit}
+        sales_breakdown = sales_df.groupby('소분류')['금액'].sum().reset_index()
+        expense_breakdown = expenses_df.groupby(['대분류', '소분류'])['금액'].sum().reset_index()
+        
+        return metrics, sales_breakdown, expense_breakdown, pnl_data
+
+    transactions_df['거래일자'] = pd.to_datetime(transactions_df['거래일자'], errors='coerce')
 
     if selected_location != "전체":
         transactions_df = transactions_df[transactions_df['사업장명'] == selected_location]
-    
-    transactions_df['거래일자'] = pd.to_datetime(transactions_df['거래일자'], errors='coerce')
-    month_trans = transactions_df[transactions_df['거래일자'].dt.strftime('%Y-%m') == selected_month].copy()
-    
-    if month_trans.empty:
-        return {}, pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-    pnl_data = pd.merge(month_trans, accounts_df, on='계정ID', how='left')
-    # 대분류가 비어있는 경우 '기타'로 처리
-    pnl_data['대분류'] = pnl_data['대분류'].fillna('기타')
+    prev_month_str = (datetime.strptime(selected_month + '-01', '%Y-%m-%d') - relativedelta(months=1)).strftime('%Y-%m')
+    
+    current_metrics, current_sales, current_expenses, current_details = get_monthly_data(selected_month)
+    prev_metrics, _, _, _ = get_monthly_data(prev_month_str)
+    
+    # 증감률 계산
+    def calc_change(current, prev):
+        if prev == 0:
+            return 0 if current == 0 else np.inf # 이전 값이 0이면 증감률을 0 또는 무한대로 처리
+        return ((current - prev) / prev) * 100
 
-    # --- 계산 ---
-    sales_df = pnl_data[pnl_data['대분류'].str.contains('매출', na=False)]
-    total_sales = sales_df['금액'].sum()
+    current_metrics['총매출_증감'] = calc_change(current_metrics['총매출'], prev_metrics['총매출'])
+    current_metrics['총비용_증감'] = calc_change(current_metrics['총비용'], prev_metrics['총비용'])
+    current_metrics['영업이익_증감'] = calc_change(current_metrics['영업이익'], prev_metrics['영업이익'])
+    current_metrics['영업이익률'] = (current_metrics['영업이익'] / current_metrics['총매출']) * 100 if current_metrics['총매출'] > 0 else 0
     
-    expenses_df = pnl_data[~pnl_data['대분류'].str.contains('매출', na=False)]
-    total_expenses = expenses_df['금액'].sum()
-    
-    operating_profit = total_sales - total_expenses
+    return current_metrics, current_sales, current_expenses, current_details
 
-    # --- 결과 구조화 ---
-    metrics = {
-        "총매출": total_sales, 
-        "총비용": total_expenses, 
-        "영업이익": operating_profit,
-        "영업이익률": (operating_profit / total_sales) * 100 if total_sales > 0 else 0
-    }
-    
-    sales_breakdown = sales_df.groupby('소분류')['금액'].sum().reset_index()
-    # expense_breakdown을 '대분류' 기준으로 집계하도록 수정
-    expense_breakdown = expenses_df.groupby('대분류')['금액'].sum().reset_index()
-    
-    return metrics, sales_breakdown, expense_breakdown, pnl_data
+# --- 엑셀 다운로드 헬퍼 함수 ---
+def create_excel_report(metrics, sales_breakdown, expense_breakdown):
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        # 요약 시트
+        summary_data = {
+            "항목": ["총매출", "총비용", "영업이익", "영업이익률"],
+            "금액": [f"{metrics['총매출']:,.0f} 원", f"{metrics['총비용']:,.0f} 원", f"{metrics['영업이익']:,.0f} 원", f"{metrics['영업이익률']:.1f} %"],
+            "전월 대비": [f"{metrics['총매출_증감']:.1f} %", f"{metrics['총비용_증감']:.1f} %", f"{metrics['영업이익_증감']:.1f} %", ""]
+        }
+        summary_df = pd.DataFrame(summary_data)
+        summary_df.to_excel(writer, sheet_name='손익 요약', index=False)
+
+        # 매출 상세 시트
+        sales_breakdown.to_excel(writer, sheet_name='매출 상세', index=False)
+        
+        # 비용 상세 시트
+        expense_breakdown.to_excel(writer, sheet_name='비용 상세', index=False)
+        
+    processed_data = output.getvalue()
+    return processed_data
 
 # =============================================================================
 # 4. UI 렌더링 함수
 # =============================================================================
-# --- 재설계된 월별 정산표 UI (대분류 직접 사용) ---
 def render_pnl_page(data):
     st.header("📅 월별 정산표")
 
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns([0.4, 0.4, 0.2])
     location_list = ["전체"] + data["LOCATIONS"]['사업장명'].tolist() if not data["LOCATIONS"].empty else ["전체"]
     selected_location = col1.selectbox("사업장 선택", location_list)
     month_options = [(datetime.now() - relativedelta(months=i)).strftime('%Y-%m') for i in range(12)]
     selected_month = col2.selectbox("조회 년/월 선택", month_options)
-    st.markdown("---")
 
-    if not selected_month:
-        st.stop()
+    if not selected_month: st.stop()
 
     metrics, sales_breakdown, expense_breakdown, pnl_details_df = calculate_pnl_new(data["TRANSACTIONS"], data["ACCOUNTS"], selected_month, selected_location)
 
-    if not metrics:
+    if not metrics or (metrics['총매출'] == 0 and metrics['총비용'] == 0):
         st.warning(f"'{selected_location}'의 {selected_month} 데이터가 없습니다.")
         st.stop()
     
-    summary_col, chart_col = st.columns([0.6, 0.4])
+    excel_data = create_excel_report(metrics, sales_breakdown, expense_breakdown)
+    col3.download_button(
+        label="📥 엑셀로 다운로드",
+        data=excel_data,
+        file_name=f"{selected_month}_{selected_location}_정산표.xlsx",
+        mime="application/vnd.ms-excel",
+        use_container_width=True
+    )
+    
+    st.markdown("---")
 
+    summary_col, chart_col = st.columns([0.6, 0.4])
     with summary_col:
         st.subheader("📊 손익 요약")
         m1, m2, m3 = st.columns(3)
-        m1.metric("총매출", f"{metrics.get('총매출', 0):,.0f} 원")
-        m2.metric("총비용", f"{metrics.get('총비용', 0):,.0f} 원")
-        m3.metric("영업이익", f"{metrics.get('영업이익', 0):,.0f} 원", f"{metrics.get('영업이익률', 0):.1f} %")
+        m1.metric("총매출", f"{metrics.get('총매출', 0):,.0f} 원", f"{metrics.get('총매출_증감', 0):.1f}% 전월 대비")
+        m2.metric("총비용", f"{metrics.get('총비용', 0):,.0f} 원", f"{metrics.get('총비용_증감', 0):.1f}% 전월 대비")
+        m3.metric("영업이익", f"{metrics.get('영업이익', 0):,.0f} 원", f"{metrics.get('영업이익_증감', 0):.1f}% 전월 대비")
         st.markdown("---")
 
-        with st.expander(f"**Ⅰ. 총매출: {metrics.get('총매출', 0):,.0f} 원**", expanded=True):
+        with st.expander(f"**Ⅰ. 총매출: {metrics.get('총매출', 0):,.0f} 원**", expanded=False):
             st.dataframe(sales_breakdown.rename(columns={'소분류': '항목', '금액': '금액(원)'}), use_container_width=True, hide_index=True)
 
         with st.expander(f"**Ⅱ. 총비용: {metrics.get('총비용', 0):,.0f} 원**", expanded=True):
-            # expense_breakdown의 컬럼명을 '대분류'로 수정
-            for _, row in expense_breakdown.iterrows():
-                category = row['대분류']
-                amount = row['금액']
-                sub_col1, sub_col2 = st.columns([0.8, 0.2])
-                sub_col1.markdown(f"- {category}: **{amount:,.0f} 원**")
-                if sub_col2.button("상세 내역", key=f"btn_{category}"):
-                    # pnl_details_df도 '대분류'로 필터링
-                    detail_df = pnl_details_df[pnl_details_df['대분류'] == category]
-                    st.dataframe(detail_df[['거래일자', '사업장명', '거래내용', '금액']].sort_values('거래일자'), use_container_width=True, hide_index=True)
+            for major_cat in expense_breakdown['대분류'].unique():
+                major_df = expense_breakdown[expense_breakdown['대분류'] == major_cat]
+                major_total = major_df['금액'].sum()
+                with st.expander(f"**{major_cat}: {major_total:,.0f} 원**"):
+                    for _, row in major_df.iterrows():
+                        sub_col1, sub_col2 = st.columns([0.8, 0.2])
+                        sub_col1.markdown(f"- {row['소분류']}: **{row['금액']:,.0f} 원**")
+                        if sub_col2.button("상세 거래 보기", key=f"btn_{row['소분류']}"):
+                            detail_df = pnl_details_df[pnl_details_df['소분류'] == row['소분류']]
+                            st.dataframe(detail_df[['거래일자', '사업장명', '거래내용', '금액']].sort_values('거래일자'), use_container_width=True, hide_index=True)
         
-        st.markdown(f"--- \n ### **Ⅲ. 영업이익: {metrics.get('영업이익', 0):,.0f} 원**")
+        st.markdown(f"--- \n ### **Ⅲ. 영업이익: {metrics.get('영업이익', 0):,.0f} 원 ({metrics.get('영업이익률', 0):.1f}%)**")
 
     with chart_col:
-        st.subheader("📈 매출 및 비용 분석")
+        st.subheader("📈 시각화 분석")
         if not sales_breakdown.empty:
             st.markdown("**매출 비중**")
-            fig_pie_sales = px.pie(sales_breakdown, names='소분류', values='금액', hole=.4,
-                                   title=f"총 매출: {metrics.get('총매출', 0):,.0f} 원")
+            fig_pie_sales = px.pie(sales_breakdown, names='소분류', values='금액', hole=.4, title=f"총 매출: {metrics.get('총매출', 0):,.0f} 원")
             fig_pie_sales.update_traces(textinfo='percent+label', textfont_size=14)
             st.plotly_chart(fig_pie_sales, use_container_width=True)
         
         if not expense_breakdown.empty:
+            expense_by_major = expense_breakdown.groupby('대분류')['금액'].sum().reset_index()
             st.markdown("**비용 비중**")
-            # expense_breakdown의 컬럼명을 '대분류'로 수정
-            fig_pie_expenses = px.pie(expense_breakdown, names='대분류', values='금액', hole=.4,
-                                      title=f"총 비용: {metrics.get('총비용', 0):,.0f} 원")
+            fig_pie_expenses = px.pie(expense_by_major, names='대분류', values='금액', hole=.4, title=f"총 비용: {metrics.get('총비용', 0):,.0f} 원")
             fig_pie_expenses.update_traces(textinfo='percent+label', textfont_size=14)
             st.plotly_chart(fig_pie_expenses, use_container_width=True)
 
