@@ -211,13 +211,22 @@ def render_data_page(data):
         st.subheader("🏢 데이터 현황")
         if data["TRANSACTIONS"].empty: st.info("아직 등록된 거래내역이 없습니다. 아래에서 파일을 업로드해주세요.")
         else:
-            summary = data["TRANSACTIONS"].groupby(['사업장명', '데이터소스']).agg(건수=('거래ID', 'count'), 최초거래일=('거래일자', 'min'), 최종거래일=('거래일자', 'max')).reset_index()
+            # Note: Ensure '거래일자' is datetime for correct min/max, otherwise it's lexical sort
+            trans_df_copy = data["TRANSACTIONS"].copy()
+            trans_df_copy['거래일자'] = pd.to_datetime(trans_df_copy['거래일자'])
+            summary = trans_df_copy.groupby(['사업장명', '데이터소스']).agg(
+                건수=('거래ID', 'count'), 
+                최초거래일=('거래일자', 'min'), 
+                최종거래일=('거래일자', 'max')
+            ).reset_index()
+            
             for location in data["LOCATIONS"]['사업장명']:
                 st.markdown(f"**{location}**")
                 loc_summary = summary[summary['사업장명'] == location]
                 if loc_summary.empty: st.write("└ 데이터 없음")
                 else:
-                    for _, row in loc_summary.iterrows(): st.write(f"└ `{row['데이터소스']}`: {row['최초거래일']} ~ {row['최종거래일']} (총 {row['건수']}건)")
+                    for _, row in loc_summary.iterrows(): 
+                        st.write(f"└ `{row['데이터소스']}`: {row['최초거래일'].strftime('%Y-%m-%d')} ~ {row['최종거래일'].strftime('%Y-%m-%d')} (총 {row['건수']}건)")
         st.markdown("---")
         
         if data["LOCATIONS"].empty or data["ACCOUNTS"].empty or data["FORMATS"].empty:
@@ -259,10 +268,14 @@ def render_data_page(data):
                         st.rerun()
         with tab2:
             st.subheader("월별재고 관리")
-            edited_inv = st.data_editor(data["INVENTORY"], num_rows="dynamic", use_container_width=True, hide_index=True,
-                column_config={"사업장명": st.column_config.SelectboxColumn("사업장명", options=data["LOCATIONS"]['사업장명'].tolist(), required=True)})
-            if st.button("💾 월별재고 저장"):
-                if update_sheet(SHEET_NAMES["INVENTORY"], edited_inv): st.success("저장되었습니다."); st.rerun()
+            # ❗️ FIX 1: Check if locations exist before rendering the editor
+            if data["LOCATIONS"].empty:
+                st.warning("`설정 관리` 탭에서 `사업장`을 먼저 추가해주세요.")
+            else:
+                edited_inv = st.data_editor(data["INVENTORY"], num_rows="dynamic", use_container_width=True, hide_index=True,
+                    column_config={"사업장명": st.column_config.SelectboxColumn("사업장명", options=data["LOCATIONS"]['사업장명'].tolist(), required=True)})
+                if st.button("💾 월별재고 저장"):
+                    if update_sheet(SHEET_NAMES["INVENTORY"], edited_inv): st.success("저장되었습니다."); st.rerun()
 
     elif st.session_state.current_step == 'confirm':
         st.subheader("✅ 1단계: 확인 및 확정")
@@ -315,9 +328,6 @@ def render_data_page(data):
         account_options = [""] + [f"[{r['대분류']}/{r['소분류']}] ({r['계정ID']})" for _, r in accounts_df.iterrows()]
         account_map = {f"[{r['대분류']}/{r['소분류']}] ({r['계정ID']})": r['계정ID'] for _, r in accounts_df.iterrows()}
         
-        # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-        # 오류 수정: data_editor에 전달하기 전, 필요한 모든 컬럼이 있는지 확인하고 생성
-        # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
         required_display_cols = ['거래일자', '거래내용', '금액', '계정과목_선택']
         for col in required_display_cols:
             if col not in df_workbench.columns:
@@ -327,26 +337,29 @@ def render_data_page(data):
             lambda row: {v: k for k, v in account_map.items()}.get(row['계정ID'], ""), axis=1
         )
         
-        # [핵심 수정] st.data_editor가 DateColumn을 올바르게 처리하도록 데이터 타입을 datetime으로 변환
         df_workbench['거래일자'] = pd.to_datetime(df_workbench['거래일자'])
         
         edited_workbench = st.data_editor(df_workbench[required_display_cols],
             hide_index=True, use_container_width=True, key="workbench_editor", num_rows="dynamic",
             column_config={
-                "거래일자": st.column_config.DateColumn("거래일자", format="YYYY-MM-DD", required=True),
-                "거래내용": st.column_config.TextColumn("거래내용", required=True),
-                "금액": st.column_config.NumberColumn("금액", required=True),
+                # ❗️ FIX 2: Removed required=True to prevent crash when adding new rows
+                "거래일자": st.column_config.DateColumn("거래일자", format="YYYY-MM-DD"),
+                "거래내용": st.column_config.TextColumn("거래내용"),
+                "금액": st.column_config.NumberColumn("금액"),
                 "계정과목_선택": st.column_config.SelectboxColumn("계정과목 선택", options=account_options)
             })
 
         st.markdown("---")
         if st.button("💾 작업 내용 최종 저장하기", type="primary", use_container_width=True):
-            if "" in edited_workbench['계정과목_선택'].tolist():
-                st.error("모든 항목의 `계정과목`을 선택해야 저장이 가능합니다.")
+            # Perform validation check here instead of in the config
+            if edited_workbench['계정과목_선택'].eq("").any() or edited_workbench['거래일자'].isnull().any() or edited_workbench['금액'].isnull().any():
+                st.error("모든 항목의 `거래일자`, `금액`, `계정과목`을 입력 혹은 선택해야 저장이 가능합니다.")
             else:
                 # data_editor의 변경사항을 원본 데이터프레임에 안전하게 병합
-                edited_ids = [st.session_state.workbench_data.iloc[i]['거래ID'] for i, r in enumerate(edited_workbench.to_dict('records'))]
-                edited_df_with_ids = edited_workbench.copy()
+                edited_ids = [st.session_state.workbench_data.iloc[i]['거래ID'] for i, r in enumerate(edited_workbench.to_dict('records')) if i < len(st.session_state.workbench_data)]
+                new_row_data = [r for i, r in enumerate(edited_workbench.to_dict('records')) if i >= len(st.session_state.workbench_data)]
+                
+                edited_df_with_ids = edited_workbench.iloc[:len(edited_ids)].copy()
                 edited_df_with_ids['거래ID'] = edited_ids
 
                 final_to_save = st.session_state.workbench_data.copy()
@@ -354,6 +367,17 @@ def render_data_page(data):
                 edited_df_with_ids = edited_df_with_ids.set_index('거래ID')
                 final_to_save.update(edited_df_with_ids)
                 final_to_save = final_to_save.reset_index()
+
+                # Process and add new rows
+                if new_row_data:
+                    new_rows_df = pd.DataFrame(new_row_data)
+                    # Get metadata from the first row of original data
+                    first_row = st.session_state.workbench_data.iloc[0]
+                    new_rows_df['사업장명'] = first_row['사업장명']
+                    new_rows_df['구분'] = first_row['구분']
+                    new_rows_df['데이터소스'] = first_row['데이터소스']
+                    new_rows_df['거래ID'] = [str(uuid.uuid4()) for _ in range(len(new_rows_df))]
+                    final_to_save = pd.concat([final_to_save, new_rows_df], ignore_index=True)
 
                 final_to_save['계정ID'] = final_to_save['계정과목_선택'].map(account_map)
                 final_to_save['처리상태'] = '수동확인'
@@ -366,7 +390,7 @@ def render_data_page(data):
                     st.session_state.current_step = 'upload'
                     if 'workbench_data' in st.session_state: del st.session_state['workbench_data']
                     st.rerun()
-
+                    
 def render_settings_page(data):
     st.header("⚙️ 설정 관리")
     tab1, tab2, tab3, tab4 = st.tabs(["🏢 사업장 관리", "📚 계정과목 관리", "🤖 자동분류 규칙", "📄 파일 포맷 관리"])
@@ -419,3 +443,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
