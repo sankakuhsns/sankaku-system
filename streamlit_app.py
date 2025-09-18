@@ -324,30 +324,39 @@ def render_data_page(data):
                         if uploaded_file.name.endswith('.csv'):
                             try: df_raw = pd.read_csv(uploaded_file, encoding='utf-8', header=None)
                             except UnicodeDecodeError: uploaded_file.seek(0); df_raw = pd.read_csv(uploaded_file, encoding='cp949', header=None)
-                        else: df_raw = pd.read_excel(uploaded_file, header=None)
+                        else: df_raw = pd.read_excel(uploaded_file, engine='openpyxl', header=None)
                         if df_raw is None: st.error("지원하지 않는 파일 형식입니다."); return
 
                         df_parsed = pd.DataFrame()
-                        # 포맷에 따라 파서 분기
                         if selected_format_name == "OKPOS 매출": df_parsed = parse_okpos(df_raw)
                         elif selected_format_name == "우리은행 지출": df_parsed = parse_woori_bank(df_raw)
                         
                         if df_parsed.empty: st.warning("파일에서 처리할 데이터를 찾지 못했습니다."); return
 
-                        # --- OKPOS 와 그 외 포맷 워크플로우 분기 ---
                         if selected_format_name == "OKPOS 매출":
                             df_final = df_parsed.copy()
+                            
+                            # --- 핵심 수정: 거래내용에 맞는 계정ID 부여 ---
+                            def get_okpos_account_id(description):
+                                accounts_df = data["ACCOUNTS"]
+                                for _, row in accounts_df.iterrows():
+                                    if row['소분류'] == description:
+                                        return row['계정ID']
+                                return ''
+                            
+                            df_final['계정ID'] = df_final['거래내용'].apply(get_okpos_account_id)
+                            # -----------------------------------------
+
                             df_final['사업장명'] = upload_location
                             df_final['구분'] = '수익'
                             df_final['데이터소스'] = selected_format_name
-                            df_final['처리상태'] = '자동등록' # OKPOS는 자동등록으로 처리
-                            df_final['계정ID'] = '' # 계정과목 없음
+                            df_final['처리상태'] = '자동등록'
                             df_final['거래ID'] = [str(uuid.uuid4()) for _ in range(len(df_final))]
                             
                             st.session_state.okpos_preview_data = df_final
                             st.session_state.current_step = 'okpos_preview'
                             st.rerun()
-                        else: # OKPOS가 아닌 다른 모든 포맷
+                        else:
                             df_final = df_parsed.copy()
                             df_final['사업장명'] = upload_location
                             df_final['구분'] = data["FORMATS"][data["FORMATS"]['포맷명'] == selected_format_name].iloc[0]['데이터구분']
@@ -369,7 +378,6 @@ def render_data_page(data):
                 if st.button("💾 월별재고 저장", key="save_inventory"):
                     if update_sheet(SHEET_NAMES["INVENTORY"], edited_inv): st.success("저장되었습니다."); st.rerun()
     
-    # +++ 신규: OKPOS 전용 미리보기 및 저장 단계 +++
     elif st.session_state.current_step == 'okpos_preview':
         st.subheader("✅ OKPOS 매출 데이터 미리보기 및 저장")
         df_preview = st.session_state.get('okpos_preview_data', pd.DataFrame())
@@ -377,7 +385,8 @@ def render_data_page(data):
         if df_preview.empty:
             st.warning("미리보기할 데이터가 없습니다. 이전 단계로 돌아가세요.")
         else:
-            st.dataframe(df_preview[['거래일자', '거래내용', '금액']], use_container_width=True, hide_index=True)
+            # 미리보기에서 계정ID가 잘 부여되었는지 확인
+            st.dataframe(df_preview[['거래일자', '거래내용', '금액', '계정ID']], use_container_width=True, hide_index=True)
 
         col1, col2 = st.columns(2)
         if col1.button("🔙 이전 단계로"):
@@ -386,13 +395,16 @@ def render_data_page(data):
             st.rerun()
         
         if col2.button("💾 최종 저장하기", type="primary"):
-            with st.spinner("데이터를 저장하는 중입니다..."):
-                combined_trans = pd.concat([data["TRANSACTIONS"], df_preview], ignore_index=True)
-                if update_sheet(SHEET_NAMES["TRANSACTIONS"], combined_trans):
-                    st.success(f"OKPOS 매출 데이터 {len(df_preview)}건이 성공적으로 저장되었습니다.")
-                    del st.session_state.okpos_preview_data
-                    st.session_state.current_step = 'upload'
-                    st.rerun()
+            if (df_preview['계정ID'] == '').any():
+                st.error("계정과목_마스터에 OKPOS 매출 항목(OKPOS 홀매출, OKPOS 포장매출, OKPOS 배달매출)이 등록되지 않았거나, 이름이 다릅니다. 확인 후 다시 시도해주세요.")
+            else:
+                with st.spinner("데이터를 저장하는 중입니다..."):
+                    combined_trans = pd.concat([data["TRANSACTIONS"], df_preview], ignore_index=True)
+                    if update_sheet(SHEET_NAMES["TRANSACTIONS"], combined_trans):
+                        st.success(f"OKPOS 매출 데이터 {len(df_preview)}건이 성공적으로 저장되었습니다.")
+                        del st.session_state.okpos_preview_data
+                        st.session_state.current_step = 'upload'
+                        st.rerun()
 
     elif st.session_state.current_step == 'confirm':
         st.subheader("✅ 1단계: 확인 및 확정")
@@ -567,4 +579,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
