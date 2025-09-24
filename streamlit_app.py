@@ -153,7 +153,6 @@ def calc_change(current, prev):
     return np.inf if current > 0 else 0
 
 def calculate_pnl_new(transactions_df, accounts_df, selected_month, selected_location):
-    # --- KeyError 방지 ---
     if transactions_df.empty or '거래일자' not in transactions_df.columns:
         return {}, pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
@@ -208,38 +207,37 @@ def create_excel_report(selected_month, selected_location, metrics, sales_breakd
     ws = wb.active
     ws.title = "손익계산서 대시보드"
 
-    # 스타일 정의
     title_font = Font(name='맑은 고딕', size=16, bold=True)
     header_font = Font(name='맑은 고딕', size=11, bold=True, color="FFFFFF")
     header_fill = PatternFill(start_color="4F81BD", end_color="4F81BD", fill_type="solid")
     center_align = Alignment(horizontal='center', vertical='center')
-    right_align = Alignment(horizontal='right', vertical='center')
     border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
 
-    def apply_header_style(cell_range):
-        for row in ws[cell_range]:
-            for cell in row:
-                cell.font = header_font
-                cell.fill = header_fill
-                cell.alignment = center_align
-                cell.border = border
-
+    def apply_header_style(worksheet, start_row, start_col, end_col):
+        for col in range(start_col, end_col + 1):
+            cell = worksheet.cell(row=start_row, column=col)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = center_align
+            cell.border = border
+    
     def auto_fit_columns(worksheet):
         for col in worksheet.columns:
             max_length = 0
+            column = col[0].column_letter
             for cell in col:
                 try:
                     if len(str(cell.value)) > max_length:
                         max_length = len(str(cell.value))
                 except: pass
             adjusted_width = (max_length + 2) * 1.2
-            worksheet.column_dimensions[col[0].column_letter].width = adjusted_width
+            worksheet.column_dimensions[column].width = adjusted_width
 
-    # --- 시트 1: 대시보드 ---
-    ws['B2'] = f"{selected_month} 월별 정산표 ({selected_location})"
     ws.merge_cells('B2:F2')
-    ws['B2'].font = title_font
-    ws['B2'].alignment = center_align
+    title_cell = ws['B2']
+    title_cell.value = f"{selected_month} 월별 정산표 ({selected_location})"
+    title_cell.font = title_font
+    title_cell.alignment = center_align
 
     summary_data = [
         ["항목", "당월 금액", "전월 대비 증감률(%)"],
@@ -248,32 +246,64 @@ def create_excel_report(selected_month, selected_location, metrics, sales_breakd
         ["영업이익", metrics['영업이익'], f"{metrics['영업이익_증감']:.1f}%"],
         ["영업이익률", f"{metrics['영업이익률']:.1f}%", ""]
     ]
-    for row in summary_data: ws.append(row)
-    apply_header_style('B5:D5')
+    for r_idx, row_data in enumerate(summary_data, 4):
+        ws.append([""] + row_data) # B열부터 시작하도록 한 칸 띄움
 
-    # 상세 내역 추가
-    ws.append([])
-    ws.append(["매출 상세"])
-    for r in dataframe_to_rows(sales_breakdown, index=False, header=True): ws.append(r)
-    
-    ws.append([])
-    ws.append(["비용 상세"])
-    expense_report_df = expense_breakdown[['대분류', '소분류', '금액_현재', '금액_과거', '증감률']].rename(columns={'금액_현재': '당월 금액', '금액_과거': '전월 금액', '증감률': '증감률(%)'})
-    for r in dataframe_to_rows(expense_report_df, index=False, header=True): ws.append(r)
+    apply_header_style(ws, 5, 2, 4)
+
+    start_row = ws.max_row + 2
+    ws.cell(row=start_row, column=2, value="매출 상세").font = title_font
+    sales_df_rows = dataframe_to_rows(sales_breakdown, index=False, header=True)
+    for r_idx, row in enumerate(sales_df_rows, start_row + 1):
+        ws.append([""] + row)
+    apply_header_style(ws, start_row + 1, 2, 2 + sales_breakdown.shape[1] - 1)
+
+    start_row = ws.max_row + 2
+    ws.cell(row=start_row, column=2, value="비용 상세").font = title_font
+    expense_report_df = expense_breakdown.rename(columns={'금액_현재': '당월 금액', '금액_과거': '전월 금액', '증감률': '증감률(%)'})
+    expense_df_rows = dataframe_to_rows(expense_report_df, index=False, header=True)
+    for r_idx, row in enumerate(expense_df_rows, start_row + 1):
+        ws.append([""] + row)
+    apply_header_style(ws, start_row + 1, 2, 2 + expense_report_df.shape[1] - 1)
 
     auto_fit_columns(ws)
 
-    # --- 시트 2: 세부 거래 내역 ---
     ws2 = wb.create_sheet("세부 거래 내역")
-    detail_cols = ['거래일자', '사업장명', '대분류', '소분류', '거래내용', '금액']
     if not pnl_details_df.empty:
+        detail_cols = ['거래일자', '사업장명', '대분류', '소분류', '거래내용', '금액']
         df_details_final = pnl_details_df[detail_cols].sort_values(by="거래일자")
         for r in dataframe_to_rows(df_details_final, index=False, header=True):
             ws2.append(r)
+        
+        apply_header_style(ws2, 1, 1, len(detail_cols))
         auto_fit_columns(ws2)
     
     wb.save(output)
     return output.getvalue()
+
+def calculate_trend_data(transactions_df, accounts_df, end_month_str, num_months, selected_location):
+    trend_data = []
+    end_month = datetime.strptime(end_month_str + '-01', '%Y-%m-%d')
+    
+    if selected_location != "전체":
+        transactions_df = transactions_df[transactions_df['사업장명'] == selected_location]
+
+    transactions_df['거래일자'] = pd.to_datetime(transactions_df['거래일자'], errors='coerce')
+    
+    for i in range(num_months - 1, -1, -1):
+        month = end_month - relativedelta(months=i)
+        month_str = month.strftime('%Y-%m')
+        
+        month_trans = transactions_df[transactions_df['거래일자'].dt.strftime('%Y-%m') == month_str]
+        pnl_data = pd.merge(month_trans, accounts_df, on='계정ID', how='left')
+        pnl_data['대분류'] = pnl_data['대분류'].fillna('기타')
+        
+        total_sales = pnl_data[pnl_data['대분류'].str.contains('매출', na=False)]['금액'].sum()
+        total_expenses = pnl_data[~pnl_data['대분류'].str.contains('매출', na=False)]['금액'].sum()
+        
+        trend_data.append({'월': month_str, '총매출': total_sales, '총비용': total_expenses})
+        
+    return pd.DataFrame(trend_data)
 
 # =============================================================================
 # 4. UI 렌더링 함수
@@ -613,7 +643,7 @@ def main():
     if not st.session_state['logged_in']:
         login_screen()
     else:
-        st.sidebar.title("🏢 통합 정산 관리 시스템")
+        st.sidebar.title("🏢 통합 정산 시스템")
         with st.spinner("데이터를 불러오는 중입니다..."):
             data = {name: load_data(sheet) for name, sheet in SHEET_NAMES.items()}
         
