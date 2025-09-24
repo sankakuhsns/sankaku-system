@@ -104,18 +104,32 @@ def load_data(sheet_name):
     except gspread.exceptions.WorksheetNotFound: st.error(f"'{sheet_name}' 시트를 찾을 수 없습니다."); return pd.DataFrame()
     except Exception as e: st.error(f"'{sheet_name}' 시트 로딩 중 오류: {e}"); return pd.DataFrame()
 
+# --- 핵심 수정: 시트가 비워지는 오류를 막기 위한 안정성 강화 ---
 def update_sheet(sheet_name, df):
     try:
         spreadsheet_key = get_spreadsheet_key()
         spreadsheet = get_gspread_client().open_by_key(spreadsheet_key)
         worksheet = spreadsheet.worksheet(sheet_name)
         worksheet.clear()
-        if '거래일자' in df.columns:
-            df['거래일자'] = pd.to_datetime(df['거래일자']).dt.strftime('%Y-%m-%d')
-        df_str = df.astype(str).replace('nan', '').replace('NaT', '')
-        worksheet.update([df_str.columns.values.tolist()] + df_str.values.tolist(), value_input_option='USER_ENTERED')
-        st.cache_data.clear(); return True
-    except Exception as e: st.error(f"'{sheet_name}' 시트 업데이트 중 오류: {e}"); return False
+
+        # 데이터프레임이 비어있더라도 헤더는 항상 존재하도록 보장
+        header = df.columns.values.tolist()
+        
+        if df.empty:
+            # 데이터가 없으면 헤더만 다시 씀
+            worksheet.update([header], value_input_option='USER_ENTERED')
+        else:
+            # 데이터가 있으면 헤더와 데이터를 함께 씀
+            if '거래일자' in df.columns:
+                df['거래일자'] = pd.to_datetime(df['거래일자']).dt.strftime('%Y-%m-%d')
+            df_str = df.astype(str).replace('nan', '').replace('NaT', '')
+            worksheet.update([header] + df_str.values.tolist(), value_input_option='USER_ENTERED')
+            
+        st.cache_data.clear()
+        return True
+    except Exception as e:
+        st.error(f"'{sheet_name}' 시트 업데이트 중 오류: {e}")
+        return False
 
 # =============================================================================
 # 2. 로그인, 3. 핵심 로직
@@ -280,34 +294,6 @@ def create_excel_report(selected_month, selected_location, metrics, sales_breakd
     
     wb.save(output)
     return output.getvalue()
-
-def calculate_trend_data(transactions_df, accounts_df, end_month_str, num_months, selected_location):
-    # --- KeyError 방지 ---
-    if transactions_df.empty or '거래일자' not in transactions_df.columns:
-        return pd.DataFrame()
-
-    trend_data = []
-    end_month = datetime.strptime(end_month_str + '-01', '%Y-%m-%d')
-    
-    if selected_location != "전체":
-        transactions_df = transactions_df[transactions_df['사업장명'] == selected_location]
-
-    transactions_df['거래일자'] = pd.to_datetime(transactions_df['거래일자'], errors='coerce')
-    
-    for i in range(num_months - 1, -1, -1):
-        month = end_month - relativedelta(months=i)
-        month_str = month.strftime('%Y-%m')
-        
-        month_trans = transactions_df[transactions_df['거래일자'].dt.strftime('%Y-%m') == month_str]
-        pnl_data = pd.merge(month_trans, accounts_df, on='계정ID', how='left')
-        pnl_data['대분류'] = pnl_data['대분류'].fillna('기타')
-        
-        total_sales = pnl_data[pnl_data['대분류'].str.contains('매출', na=False)]['금액'].sum()
-        total_expenses = pnl_data[~pnl_data['대분류'].str.contains('매출', na=False)]['금액'].sum()
-        
-        trend_data.append({'월': month_str, '총매출': total_sales, '총비용': total_expenses})
-        
-    return pd.DataFrame(trend_data)
 
 # =============================================================================
 # 4. UI 렌더링 함수
