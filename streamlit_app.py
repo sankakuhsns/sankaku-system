@@ -105,26 +105,25 @@ def load_data(sheet_name):
     except Exception as e: st.error(f"'{sheet_name}' 시트 로딩 중 오류: {e}"); return pd.DataFrame()
 
 # --- 핵심 수정: 시트가 비워지는 오류를 막기 위한 안정성 강화 ---
-def update_sheet(sheet_name, df):
+def update_sheet(sheet_name, df, original_df):
     try:
         spreadsheet_key = get_spreadsheet_key()
         spreadsheet = get_gspread_client().open_by_key(spreadsheet_key)
         worksheet = spreadsheet.worksheet(sheet_name)
         
-        # 데이터프레임이 비어있더라도 헤더는 항상 존재하도록 보장
-        header = df.columns.values.tolist()
+        # 원본 데이터프레임에서 헤더를 가져와 안정성 확보
+        header = original_df.columns.values.tolist()
+        worksheet.clear()
         
-        # 저장할 데이터가 있을 때만 시트를 지우고 새로 씀
-        if not df.empty:
-            worksheet.clear()
+        if df.empty:
+            # 데이터가 없으면 헤더만 다시 씀
+            worksheet.update([header], value_input_option='USER_ENTERED')
+        else:
+            # 데이터가 있으면 헤더와 데이터를 함께 씀
             if '거래일자' in df.columns:
                 df['거래일자'] = pd.to_datetime(df['거래일자']).dt.strftime('%Y-%m-%d')
             df_str = df.astype(str).replace('nan', '').replace('NaT', '')
             worksheet.update([header] + df_str.values.tolist(), value_input_option='USER_ENTERED')
-        else:
-            # 데이터가 없으면 헤더만 다시 씀 (내용이 모두 삭제된 경우)
-            worksheet.clear()
-            worksheet.update([header], value_input_option='USER_ENTERED')
             
         st.cache_data.clear()
         return True
@@ -504,7 +503,7 @@ def render_data_page(data):
             else:
                 edited_inv = st.data_editor(data["INVENTORY"], num_rows="dynamic", use_container_width=True, hide_index=True, column_config={"사업장명": st.column_config.SelectboxColumn("사업장명", options=data["LOCATIONS"]['사업장명'].tolist(), required=True)})
                 if st.button("💾 월별재고 저장", key="save_inventory"):
-                    if update_sheet(SHEET_NAMES["INVENTORY"], edited_inv):
+                    if update_sheet(SHEET_NAMES["INVENTORY"], edited_inv, data["INVENTORY"]):
                         st.success("저장되었습니다.")
                         st.rerun()
     elif st.session_state.current_step == 'okpos_preview':
@@ -525,7 +524,7 @@ def render_data_page(data):
             else:
                 with st.spinner("데이터를 저장하는 중입니다..."):
                     combined_trans = pd.concat([data["TRANSACTIONS"], df_preview], ignore_index=True)
-                    if update_sheet(SHEET_NAMES["TRANSACTIONS"], combined_trans):
+                    if update_sheet(SHEET_NAMES["TRANSACTIONS"], combined_trans, data["TRANSACTIONS"]):
                         st.success(f"OKPOS 매출 데이터 {len(df_preview)}건이 성공적으로 저장되었습니다.")
                         del st.session_state.okpos_preview_data
                         st.session_state.current_step = 'upload'
@@ -620,7 +619,7 @@ def render_data_page(data):
                     final_cols = data["TRANSACTIONS"].columns
                     df_saved = df_to_process.reindex(columns=final_cols).fillna('')
                     combined_trans = pd.concat([data["TRANSACTIONS"], df_saved], ignore_index=True)
-                    if update_sheet(SHEET_NAMES["TRANSACTIONS"], combined_trans):
+                    if update_sheet(SHEET_NAMES["TRANSACTIONS"], combined_trans, data["TRANSACTIONS"]):
                         st.success(f"{len(df_saved)}건을 성공적으로 저장했습니다.")
                         if df_to_keep.empty:
                             if 'workbench_data' in st.session_state:
@@ -635,23 +634,23 @@ def render_settings_page(data):
     with tab1:
         edited_locs = st.data_editor(data["LOCATIONS"], num_rows="dynamic", use_container_width=True, hide_index=True)
         if st.button("사업장 정보 저장", key="save_locations"):
-            if update_sheet(SHEET_NAMES["LOCATIONS"], edited_locs): st.success("저장되었습니다."); st.rerun()
+            if update_sheet(SHEET_NAMES["LOCATIONS"], edited_locs, data["LOCATIONS"]): st.success("저장되었습니다."); st.rerun()
     with tab2:
         edited_accs = st.data_editor(data["ACCOUNTS"], num_rows="dynamic", use_container_width=True, hide_index=True)
         if st.button("계정과목 저장", key="save_accounts"):
-            if update_sheet(SHEET_NAMES["ACCOUNTS"], edited_accs): st.success("저장되었습니다."); st.rerun()
+            if update_sheet(SHEET_NAMES["ACCOUNTS"], edited_accs, data["ACCOUNTS"]): st.success("저장되었습니다."); st.rerun()
     with tab3:
         if data["ACCOUNTS"].empty: st.warning("`계정과목 관리` 탭에서 계정과목을 먼저 추가해주세요.")
         else:
             edited_rules = st.data_editor(data["RULES"], num_rows="dynamic", use_container_width=True, hide_index=True,
                 column_config={"계정ID": st.column_config.SelectboxColumn("계정ID", options=data["ACCOUNTS"]['계정ID'].tolist(), required=True)})
             if st.button("자동분류 규칙 저장", key="save_rules"):
-                if update_sheet(SHEET_NAMES["RULES"], edited_rules): st.success("저장되었습니다."); st.rerun()
+                if update_sheet(SHEET_NAMES["RULES"], edited_rules, data["RULES"]): st.success("저장되었습니다."); st.rerun()
     with tab4:
         edited_formats = st.data_editor(data["FORMATS"], num_rows="dynamic", use_container_width=True, hide_index=True,
             column_config={"데이터구분": st.column_config.SelectboxColumn("데이터구분", options=["수익", "비용"], required=True)})
         if st.button("파일 포맷 저장", key="save_formats"):
-            if update_sheet(SHEET_NAMES["FORMATS"], edited_formats): st.success("저장되었습니다."); st.rerun()
+            if update_sheet(SHEET_NAMES["FORMATS"], edited_formats, data["FORMATS"]): st.success("저장되었습니다."); st.rerun()
 
 # =============================================================================
 # 5. 메인 실행 로직
