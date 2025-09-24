@@ -110,20 +110,21 @@ def update_sheet(sheet_name, df):
         spreadsheet_key = get_spreadsheet_key()
         spreadsheet = get_gspread_client().open_by_key(spreadsheet_key)
         worksheet = spreadsheet.worksheet(sheet_name)
-        worksheet.clear()
-
+        
         # 데이터프레임이 비어있더라도 헤더는 항상 존재하도록 보장
         header = df.columns.values.tolist()
         
-        if df.empty:
-            # 데이터가 없으면 헤더만 다시 씀
-            worksheet.update([header], value_input_option='USER_ENTERED')
-        else:
-            # 데이터가 있으면 헤더와 데이터를 함께 씀
+        # 저장할 데이터가 있을 때만 시트를 지우고 새로 씀
+        if not df.empty:
+            worksheet.clear()
             if '거래일자' in df.columns:
                 df['거래일자'] = pd.to_datetime(df['거래일자']).dt.strftime('%Y-%m-%d')
             df_str = df.astype(str).replace('nan', '').replace('NaT', '')
             worksheet.update([header] + df_str.values.tolist(), value_input_option='USER_ENTERED')
+        else:
+            # 데이터가 없으면 헤더만 다시 씀 (내용이 모두 삭제된 경우)
+            worksheet.clear()
+            worksheet.update([header], value_input_option='USER_ENTERED')
             
         st.cache_data.clear()
         return True
@@ -294,6 +295,33 @@ def create_excel_report(selected_month, selected_location, metrics, sales_breakd
     
     wb.save(output)
     return output.getvalue()
+
+def calculate_trend_data(transactions_df, accounts_df, end_month_str, num_months, selected_location):
+    if transactions_df.empty or '거래일자' not in transactions_df.columns:
+        return pd.DataFrame()
+
+    trend_data = []
+    end_month = datetime.strptime(end_month_str + '-01', '%Y-%m-%d')
+    
+    if selected_location != "전체":
+        transactions_df = transactions_df[transactions_df['사업장명'] == selected_location]
+
+    transactions_df['거래일자'] = pd.to_datetime(transactions_df['거래일자'], errors='coerce')
+    
+    for i in range(num_months - 1, -1, -1):
+        month = end_month - relativedelta(months=i)
+        month_str = month.strftime('%Y-%m')
+        
+        month_trans = transactions_df[transactions_df['거래일자'].dt.strftime('%Y-%m') == month_str]
+        pnl_data = pd.merge(month_trans, accounts_df, on='계정ID', how='left')
+        pnl_data['대분류'] = pnl_data['대분류'].fillna('기타')
+        
+        total_sales = pnl_data[pnl_data['대분류'].str.contains('매출', na=False)]['금액'].sum()
+        total_expenses = pnl_data[~pnl_data['대분류'].str.contains('매출', na=False)]['금액'].sum()
+        
+        trend_data.append({'월': month_str, '총매출': total_sales, '총비용': total_expenses})
+        
+    return pd.DataFrame(trend_data)
 
 # =============================================================================
 # 4. UI 렌더링 함수
