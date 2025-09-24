@@ -246,26 +246,26 @@ def create_excel_report(selected_month, selected_location, metrics, sales_breakd
         ["영업이익", metrics['영업이익'], f"{metrics['영업이익_증감']:.1f}%"],
         ["영업이익률", f"{metrics['영업이익률']:.1f}%", ""]
     ]
-    for r_idx, row_data in enumerate(summary_data, 4):
-        ws.append([""] + row_data) # B열부터 시작하도록 한 칸 띄움
-
+    current_row = 4
+    for r_idx, row_data in enumerate(summary_data, current_row):
+        ws.append([""] + row_data)
     apply_header_style(ws, 5, 2, 4)
 
-    start_row = ws.max_row + 2
-    ws.cell(row=start_row, column=2, value="매출 상세").font = title_font
+    current_row = ws.max_row + 2
+    ws.cell(row=current_row, column=2, value="매출 상세").font = title_font
     sales_df_rows = dataframe_to_rows(sales_breakdown, index=False, header=True)
-    for r_idx, row in enumerate(sales_df_rows, start_row + 1):
+    for r_idx, row in enumerate(sales_df_rows, current_row + 1):
         ws.append([""] + row)
-    apply_header_style(ws, start_row + 1, 2, 2 + sales_breakdown.shape[1] - 1)
+    apply_header_style(ws, current_row + 1, 2, 2 + sales_breakdown.shape[1] - 1)
 
-    start_row = ws.max_row + 2
-    ws.cell(row=start_row, column=2, value="비용 상세").font = title_font
+    current_row = ws.max_row + 2
+    ws.cell(row=current_row, column=2, value="비용 상세").font = title_font
     expense_report_df = expense_breakdown.rename(columns={'금액_현재': '당월 금액', '금액_과거': '전월 금액', '증감률': '증감률(%)'})
-    expense_df_rows = dataframe_to_rows(expense_report_df, index=False, header=True)
-    for r_idx, row in enumerate(expense_df_rows, start_row + 1):
+    expense_df_rows = dataframe_to_rows(expense_report_df[['대분류', '소분류', '당월 금액', '전월 금액', '증감률(%)']], index=False, header=True)
+    for r_idx, row in enumerate(expense_df_rows, current_row + 1):
         ws.append([""] + row)
-    apply_header_style(ws, start_row + 1, 2, 2 + expense_report_df.shape[1] - 1)
-
+    apply_header_style(ws, current_row + 1, 2, 2 + expense_report_df.shape[1] - 1)
+    
     auto_fit_columns(ws)
 
     ws2 = wb.create_sheet("세부 거래 내역")
@@ -282,6 +282,10 @@ def create_excel_report(selected_month, selected_location, metrics, sales_breakd
     return output.getvalue()
 
 def calculate_trend_data(transactions_df, accounts_df, end_month_str, num_months, selected_location):
+    # --- KeyError 방지 ---
+    if transactions_df.empty or '거래일자' not in transactions_df.columns:
+        return pd.DataFrame()
+
     trend_data = []
     end_month = datetime.strptime(end_month_str + '-01', '%Y-%m-%d')
     
